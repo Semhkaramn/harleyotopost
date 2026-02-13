@@ -21,7 +21,8 @@ async def init_db():
             config.DATABASE_URL,
             min_size=1,
             max_size=10,
-            command_timeout=60
+            command_timeout=60,
+            statement_cache_size=0  # Heroku PgBouncer uyumluluğu için devre dışı
         )
         logger.info("Database connection pool created")
     except Exception as e:
