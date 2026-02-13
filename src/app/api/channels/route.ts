@@ -88,6 +88,10 @@ export async function POST(request: Request) {
       }
     }
 
+    // source_chat_id ve target_chat_id'yi BigInt olarak parse et
+    const parsedSourceChatId = BigInt(String(source_chat_id).replace(/[^0-9-]/g, ''));
+    const parsedTargetChatId = finalTargetChatId ? BigInt(String(finalTargetChatId).replace(/[^0-9-]/g, '')) : null;
+
     const result = await query(
       `INSERT INTO source_channels
        (source_chat_id, target_chat_id, target_channel_id, source_title, source_username,
@@ -111,8 +115,8 @@ export async function POST(request: Request) {
          updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [
-        source_chat_id,
-        finalTargetChatId,
+        parsedSourceChatId.toString(),
+        parsedTargetChatId?.toString() || null,
         target_channel_id || null,
         source_title || null,
         source_username || null,
@@ -142,8 +146,14 @@ export async function PUT(request: Request) {
     const body = await request.json();
     const { id, target_channel_id, ...updates } = body;
 
+    // ID doğrulaması
+    if (!id) {
+      return NextResponse.json({ error: 'Channel ID is required' }, { status: 400 });
+    }
+
     const setClause: string[] = [];
-    const values: unknown[] = [id];
+    // ID'yi integer olarak dönüştür
+    const values: unknown[] = [parseInt(String(id))];
     let paramIndex = 2;
 
     // If target_channel_id is being updated, also update target_chat_id and target_title
