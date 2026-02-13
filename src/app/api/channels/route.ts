@@ -9,6 +9,11 @@ async function ensureTableStructure() {
       ALTER TABLE source_channels
       ADD COLUMN IF NOT EXISTS target_channel_id INTEGER
     `);
+    // Add append_link_text column if it doesn't exist
+    await query(`
+      ALTER TABLE source_channels
+      ADD COLUMN IF NOT EXISTS append_link_text TEXT DEFAULT ''
+    `);
   } catch {
     // Column might already exist, ignore error
   }
@@ -59,6 +64,7 @@ export async function POST(request: Request) {
       source_username,
       target_title,
       append_link,
+      append_link_text,
       daily_limit,
       remove_links,
       remove_emojis,
@@ -85,9 +91,9 @@ export async function POST(request: Request) {
     const result = await query(
       `INSERT INTO source_channels
        (source_chat_id, target_chat_id, target_channel_id, source_title, source_username,
-        target_title, append_link, daily_limit, remove_links, remove_emojis,
+        target_title, append_link, append_link_text, daily_limit, remove_links, remove_emojis,
         listen_type, trigger_keywords, send_link_back)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (source_chat_id) DO UPDATE SET
          target_chat_id = $2,
          target_channel_id = $3,
@@ -95,12 +101,13 @@ export async function POST(request: Request) {
          source_username = COALESCE($5, source_channels.source_username),
          target_title = COALESCE($6, source_channels.target_title),
          append_link = $7,
-         daily_limit = $8,
-         remove_links = $9,
-         remove_emojis = $10,
-         listen_type = $11,
-         trigger_keywords = $12,
-         send_link_back = $13,
+         append_link_text = $8,
+         daily_limit = $9,
+         remove_links = $10,
+         remove_emojis = $11,
+         listen_type = $12,
+         trigger_keywords = $13,
+         send_link_back = $14,
          updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [
@@ -111,6 +118,7 @@ export async function POST(request: Request) {
         source_username || null,
         finalTargetTitle || null,
         append_link || '',
+        append_link_text || '',
         daily_limit || 4,
         remove_links !== false,
         remove_emojis === true,
@@ -165,9 +173,11 @@ export async function PUT(request: Request) {
       }
     }
 
+    // source_chat_id is UNIQUE and should not be changed after creation
     const allowedFields = [
-      'target_chat_id', 'source_title', 'target_title',
-      'append_link', 'daily_limit', 'remove_links', 'remove_emojis', 'is_active',
+      'source_title', 'source_username',
+      'target_chat_id', 'target_title',
+      'append_link', 'append_link_text', 'daily_limit', 'remove_links', 'remove_emojis', 'is_active',
       'listen_type', 'trigger_keywords', 'send_link_back'
     ];
 
