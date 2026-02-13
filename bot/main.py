@@ -77,7 +77,7 @@ def create_client():
 
 def remove_links_from_message(raw_text: str, entities: list) -> tuple:
     """
-    Mesajdan link entity'lerini ve kapladıkları metni tamamen kaldır.
+    Mesajdan link entity'lerini içeren SATIRLARI tamamen kaldır.
     Formatting entity'lerini (bold, italic, custom emoji vb.) koru.
 
     Args:
@@ -110,78 +110,106 @@ def remove_links_from_message(raw_text: str, entities: list) -> tuple:
     if not link_entities:
         return raw_text, formatting_entities
 
-    # Link aralıklarını bul ve sırala (sondan başa - offset bozulmasın)
-    link_ranges = [(e.offset, e.offset + e.length) for e in link_entities]
-    link_ranges.sort(key=lambda x: x[0], reverse=True)
+    # Satırları bul
+    lines = raw_text.split('\n')
 
-    # Metni UTF-16 code units olarak işle (Telegram offset'leri UTF-16)
-    # Python string -> UTF-16 bytes (her code unit 2 byte)
-    text_bytes = raw_text.encode('utf-16-le')
+    # Her link entity'sinin hangi satırda olduğunu bul
+    lines_to_remove = set()
 
-    # Her link aralığını sil
-    for start_offset, end_offset in link_ranges:
-        removed_length = end_offset - start_offset
+    for entity in link_entities:
+        # UTF-16 offset'i karakter pozisyonuna çevir
+        link_start = entity.offset
 
-        # Byte pozisyonları (UTF-16-LE: her karakter 2 byte)
-        start_byte = start_offset * 2
-        end_byte = end_offset * 2
+        # Link'in hangi satırda olduğunu bul
+        current_pos = 0
+        for line_idx, line in enumerate(lines):
+            line_end = current_pos + len(line)
+            if current_pos <= link_start < line_end + 1:  # +1 for \n
+                lines_to_remove.add(line_idx)
+                break
+            current_pos = line_end + 1  # +1 for \n
 
-        # Güvenlik kontrolü
-        if start_byte > len(text_bytes) or end_byte > len(text_bytes):
-            continue
+    # Link içermeyen satırları birleştir
+    cleaned_lines = []
+    for idx, line in enumerate(lines):
+        if idx not in lines_to_remove:
+            cleaned_lines.append(line)
 
-        # Metinden bu aralığı sil
-        text_bytes = text_bytes[:start_byte] + text_bytes[end_byte:]
+    cleaned_text = '\n'.join(cleaned_lines)
 
-        # Formatting entity offset'lerini güncelle
-        updated_formatting = []
-        for entity in formatting_entities:
-            e_start = entity.offset
-            e_end = entity.offset + entity.length
+    # Boş satırları temizle (ardışık boş satırları tek satıra indir)
+    while '\n\n\n' in cleaned_text:
+        cleaned_text = cleaned_text.replace('\n\n\n', '\n\n')
 
-            if e_start >= end_offset:
-                # Entity silinen bölümden sonra - offset'i azalt
-                entity.offset -= removed_length
+    # Formatting entity'lerini güncelle - link satırları silindikten sonra offset'leri ayarla
+    # Not: Bu basit bir yaklaşım - karmaşık formatlama için daha detaylı işlem gerekebilir
+    updated_formatting = []
+    removed_chars = 0
+    current_pos = 0
+
+    for line_idx, line in enumerate(lines):
+        line_len = len(line) + 1  # +1 for \n
+        if line_idx in lines_to_remove:
+            # Bu satır silindi, offset'leri güncelle
+            for entity in formatting_entities:
+                if entity.offset >= current_pos + line_len:
+                    entity.offset -= line_len
+            removed_chars += line_len
+        current_pos += line_len
+
+    # Sadece geçerli entity'leri tut
+    for entity in formatting_entities:
+        if entity.offset >= 0 and entity.length > 0:
+            # Entity'nin pozisyonunun temizlenmiş metinde geçerli olup olmadığını kontrol et
+            if entity.offset < len(cleaned_text):
                 updated_formatting.append(entity)
-            elif e_end <= start_offset:
-                # Entity silinen bölümden önce - değişiklik yok
-                updated_formatting.append(entity)
-            elif e_start < start_offset and e_end > end_offset:
-                # Entity silinen bölümü tamamen kapsıyor - length azalt
-                entity.length -= removed_length
-                if entity.length > 0:
-                    updated_formatting.append(entity)
-            elif e_start >= start_offset and e_end <= end_offset:
-                # Entity tamamen silinen bölümde - entity'yi sil
-                pass
-            elif e_start < start_offset and e_end > start_offset and e_end <= end_offset:
-                # Entity'nin sonu silinen bölümde
-                entity.length = start_offset - e_start
-                if entity.length > 0:
-                    updated_formatting.append(entity)
-            elif e_start >= start_offset and e_start < end_offset and e_end > end_offset:
-                # Entity'nin başı silinen bölümde
-                new_length = e_end - end_offset
-                entity.offset = start_offset
-                entity.length = new_length
-                if entity.length > 0:
-                    updated_formatting.append(entity)
 
-        formatting_entities = updated_formatting
-
-    # UTF-16 bytes -> Python string
-    cleaned_text = text_bytes.decode('utf-16-le', errors='ignore')
-
-    return cleaned_text.strip(), formatting_entities
+    return cleaned_text.strip(), updated_formatting
 
 
-def append_link_to_text(text: str, link: str) -> str:
-    """Metnin sonuna link ekle"""
+def append_link_to_text(text: str, link: str, link_text: str = None) -> tuple:
+    """
+    Metnin sonuna link ekle.
+    Eğer link_text verilmişse, Telegram'daki gibi metin üzerine link oluşturur.
+
+    Args:
+        text: Orijinal metin
+        link: Eklenecek URL
+        link_text: Link'in görünür metni (opsiyonel)
+
+    Returns:
+        (güncellenmiş_metin, ek_entity_listesi)
+    """
     if not link:
-        return text
+        return text, []
+
+    # Link metni varsa, metin olarak göster ve entity ekle
+    if link_text and link_text.strip():
+        display_text = link_text.strip()
+    else:
+        # Link metni yoksa, URL'yi doğrudan göster
+        display_text = link
+
     if text:
-        return f"{text}\n\n{link}"
-    return link
+        new_text = f"{text}\n\n{display_text}"
+        # Link entity'si için offset hesapla (UTF-16)
+        link_offset = len(text) + 2  # +2 for \n\n
+    else:
+        new_text = display_text
+        link_offset = 0
+
+    # Eğer link metni varsa, MessageEntityTextUrl oluştur
+    entities = []
+    if link_text and link_text.strip():
+        # MessageEntityTextUrl entity'si oluştur
+        entity = MessageEntityTextUrl(
+            offset=link_offset,
+            length=len(display_text),
+            url=link
+        )
+        entities.append(entity)
+
+    return new_text, entities
 
 
 async def parse_telegram_link(link: str) -> tuple:
@@ -229,6 +257,7 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
     try:
         target_chat_id = source_channel_config['target_chat_id']
         append_link = source_channel_config['append_link']
+        append_link_text = source_channel_config.get('append_link_text', '')
         remove_links = source_channel_config['remove_links']
         trigger_keywords = source_channel_config.get('trigger_keywords', '')
         send_link_back = source_channel_config.get('send_link_back', False)
@@ -255,9 +284,12 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             final_text = original_text
             final_entities = original_entities
 
-        # Append link
+        # Append link (link metni desteği ile)
         if append_link:
-            final_text = append_link_to_text(final_text, append_link)
+            final_text, link_entities = append_link_to_text(final_text, append_link, append_link_text)
+            # Link entity'lerini mevcut entity'lere ekle
+            if link_entities:
+                final_entities = final_entities + link_entities
 
         # Media kontrolü
         has_media = message.media is not None
