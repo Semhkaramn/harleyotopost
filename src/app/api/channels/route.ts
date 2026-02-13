@@ -40,14 +40,18 @@ export async function POST(request: Request) {
       append_link,
       daily_limit,
       remove_links,
-      remove_emojis
+      remove_emojis,
+      listen_type,
+      trigger_keywords,
+      send_link_back
     } = body;
 
     const result = await query(
       `INSERT INTO source_channels
        (source_chat_id, target_chat_id, source_title, source_username,
-        target_title, append_link, daily_limit, remove_links, remove_emojis)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        target_title, append_link, daily_limit, remove_links, remove_emojis,
+        listen_type, trigger_keywords, send_link_back)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (source_chat_id) DO UPDATE SET
          target_chat_id = $2,
          source_title = COALESCE($3, source_channels.source_title),
@@ -57,6 +61,9 @@ export async function POST(request: Request) {
          daily_limit = $7,
          remove_links = $8,
          remove_emojis = $9,
+         listen_type = $10,
+         trigger_keywords = $11,
+         send_link_back = $12,
          updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [
@@ -68,7 +75,10 @@ export async function POST(request: Request) {
         append_link || '',
         daily_limit || 4,
         remove_links !== false,
-        remove_emojis === true
+        remove_emojis === true,
+        listen_type || 'direct',
+        trigger_keywords || '',
+        send_link_back === true
       ]
     );
 
@@ -90,7 +100,8 @@ export async function PUT(request: Request) {
 
     const allowedFields = [
       'target_chat_id', 'source_title', 'target_title',
-      'append_link', 'daily_limit', 'remove_links', 'remove_emojis', 'is_active'
+      'append_link', 'daily_limit', 'remove_links', 'remove_emojis', 'is_active',
+      'listen_type', 'trigger_keywords', 'send_link_back'
     ];
 
     for (const field of allowedFields) {
