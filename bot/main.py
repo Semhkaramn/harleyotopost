@@ -8,6 +8,9 @@ from telethon.sessions import StringSession
 from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
+    MessageEntityTextUrl,
+    MessageEntityUrl,
+    MessageEntityMention,
 )
 from telethon.errors import (
     FloodWaitError,
@@ -62,52 +65,87 @@ def create_client():
     )
 
 
-def remove_urls_from_text(text: str) -> str:
-    """Remove all URLs from text"""
+def clean_message_with_entities(text: str, entities: list, remove_links: bool) -> tuple:
+    """
+    Clean message text and entities.
+    - Removes hyperlinked text (text with attached links) when remove_links is True
+    - Removes plain URLs and @mentions when remove_links is True
+    - Keeps all formatting (bold, italic, etc.)
+    - Keeps all emojis (normal and premium)
+
+    Returns: (cleaned_text, cleaned_entities)
+    """
     if not text:
-        return text
-    return URL_PATTERN.sub('', text).strip()
+        return text, entities
 
+    if not remove_links:
+        return text, entities
 
-def remove_emojis_from_text(text: str) -> str:
-    """Remove emojis from text"""
-    if not text:
-        return text
-    emoji_pattern = re.compile(
-        "["
-        "\U0001F600-\U0001F64F"  # emoticons
-        "\U0001F300-\U0001F5FF"  # symbols & pictographs
-        "\U0001F680-\U0001F6FF"  # transport & map symbols
-        "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-        "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251"
-        "\U0001F900-\U0001F9FF"  # supplemental symbols
-        "\U0001FA00-\U0001FA6F"  # chess symbols
-        "\U0001FA70-\U0001FAFF"  # symbols and pictographs extended-a
-        "]+",
-        flags=re.UNICODE
-    )
-    return emoji_pattern.sub('', text).strip()
+    if not entities:
+        # No entities, just remove plain URLs
+        cleaned = URL_PATTERN.sub('', text)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        cleaned = re.sub(r' {2,}', ' ', cleaned)
+        return cleaned.strip(), []
 
+    # Collect ranges to remove (hyperlinked text, URLs, mentions)
+    ranges_to_remove = []
+    entities_to_keep = []
 
-def clean_message_text(text: str, remove_links: bool, remove_emojis: bool) -> str:
-    """Clean message text based on settings"""
-    if not text:
-        return text
+    for entity in entities:
+        # Check if this is a link-related entity
+        if isinstance(entity, MessageEntityTextUrl):
+            # Hyperlinked text - remove the entire text range
+            ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+        elif isinstance(entity, MessageEntityUrl):
+            # Plain URL in text - remove it
+            ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+        elif isinstance(entity, MessageEntityMention):
+            # @mention - remove it
+            ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+        else:
+            # Keep other entities (bold, italic, emoji, etc.)
+            entities_to_keep.append(entity)
 
-    result = text
+    # Sort ranges by start position (descending) to remove from end to start
+    ranges_to_remove.sort(key=lambda x: x[0], reverse=True)
 
-    if remove_links:
-        result = remove_urls_from_text(result)
+    # Remove the ranges from text
+    cleaned_text = text
+    for start, end in ranges_to_remove:
+        cleaned_text = cleaned_text[:start] + cleaned_text[end:]
 
-    if remove_emojis:
-        result = remove_emojis_from_text(result)
+    # Adjust entity offsets for kept entities
+    adjusted_entities = []
+    for entity in entities_to_keep:
+        new_offset = entity.offset
+        new_length = entity.length
+
+        # Calculate how much to shift based on removed ranges before this entity
+        shift = 0
+        entity_removed = False
+
+        for start, end in sorted(ranges_to_remove, key=lambda x: x[0]):
+            removed_length = end - start
+
+            if end <= entity.offset:
+                # Removed range is completely before entity
+                shift += removed_length
+            elif start < entity.offset + entity.length and end > entity.offset:
+                # Removed range overlaps with entity - entity is affected
+                entity_removed = True
+                break
+
+        if not entity_removed:
+            entity.offset = new_offset - shift
+            if entity.offset >= 0:
+                adjusted_entities.append(entity)
 
     # Clean up extra whitespace and newlines
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    result = re.sub(r' {2,}', ' ', result)
+    cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
+    cleaned_text = re.sub(r' {2,}', ' ', cleaned_text)
 
-    return result.strip()
+    return cleaned_text.strip(), adjusted_entities
 
 
 def append_link_to_text(text: str, link: str) -> str:
@@ -171,19 +209,21 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         target_chat_id = source_channel_config['target_chat_id']
         append_link = source_channel_config['append_link']
         remove_links = source_channel_config['remove_links']
-        remove_emojis_flag = source_channel_config['remove_emojis']
         trigger_keywords = source_channel_config.get('trigger_keywords', '')
         send_link_back = source_channel_config.get('send_link_back', False)
 
-        # Clean the message text
+        # Get original text and entities
         original_text = message.text or message.caption or ''
+        original_entities = list(message.entities or message.caption_entities or [])
 
         # Check trigger keywords
         if not check_trigger_keywords(original_text, trigger_keywords):
             logger.info(f"Message {message.id} skipped - no matching trigger keywords")
             return False
 
-        cleaned_text = clean_message_text(original_text, remove_links, remove_emojis_flag)
+        # Clean text and entities (removes hyperlinked text, URLs, mentions if remove_links is True)
+        # Keeps all formatting (bold, italic, etc.) and emojis (normal and premium)
+        cleaned_text, cleaned_entities = clean_message_with_entities(original_text, original_entities, remove_links)
         final_text = append_link_to_text(cleaned_text, append_link)
 
         # Determine media type
@@ -198,21 +238,21 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             else:
                 media_type = 'other'
 
-        # Send to target
+        # Send to target with entities (preserves formatting and emojis including premium)
         if has_media:
             # Forward with media
             sent_message = await client.send_file(
                 target_chat_id,
                 message.media,
                 caption=final_text if final_text else None,
-                parse_mode='html'
+                formatting_entities=cleaned_entities if cleaned_entities else None
             )
         else:
             # Text only
             sent_message = await client.send_message(
                 target_chat_id,
                 final_text,
-                parse_mode='html'
+                formatting_entities=cleaned_entities if cleaned_entities else None
             )
 
         # Create source link
