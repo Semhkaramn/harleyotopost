@@ -494,9 +494,20 @@ export default function Dashboard() {
                   <CardTitle className="text-zinc-100">Hedef Kanallar</CardTitle>
                   <CardDescription>Mesajlarin gonderilecegi kanallar</CardDescription>
                 </div>
-                <Dialog open={isTargetDialogOpen} onOpenChange={setIsTargetDialogOpen}>
+                <Dialog open={isTargetDialogOpen} onOpenChange={(open) => {
+                    if (open && !editingTargetChannel) {
+                      setEditingTargetChannel({ ...emptyTargetChannel });
+                    }
+                    setIsTargetDialogOpen(open);
+                    if (!open) {
+                      setEditingTargetChannel(null);
+                    }
+                  }}>
                   <DialogTrigger asChild>
-                    <Button onClick={() => setEditingTargetChannel({ ...emptyTargetChannel })} className="bg-emerald-600 hover:bg-emerald-700">
+                    <Button onClick={() => {
+                      setEditingTargetChannel({ ...emptyTargetChannel });
+                      setIsTargetDialogOpen(true);
+                    }} className="bg-emerald-600 hover:bg-emerald-700">
                       <PlusIcon />
                       <span className="ml-2">Hedef Ekle</span>
                     </Button>
@@ -632,10 +643,21 @@ export default function Dashboard() {
                   <CardTitle className="text-zinc-100">Dinleme Kanallari</CardTitle>
                   <CardDescription>Mesajlarin alinacagi kaynaklar</CardDescription>
                 </div>
-                <Dialog open={isSourceDialogOpen} onOpenChange={setIsSourceDialogOpen}>
+                <Dialog open={isSourceDialogOpen} onOpenChange={(open) => {
+                    if (open && !editingSourceChannel) {
+                      setEditingSourceChannel({ ...emptySourceChannel });
+                    }
+                    setIsSourceDialogOpen(open);
+                    if (!open) {
+                      setEditingSourceChannel(null);
+                    }
+                  }}>
                   <DialogTrigger asChild>
                     <Button
-                      onClick={() => setEditingSourceChannel({ ...emptySourceChannel })}
+                      onClick={() => {
+                        setEditingSourceChannel({ ...emptySourceChannel });
+                        setIsSourceDialogOpen(true);
+                      }}
                       className="bg-emerald-600 hover:bg-emerald-700"
                       disabled={targetChannels.length === 0}
                     >
