@@ -302,13 +302,29 @@ export default function Dashboard() {
       return;
     }
 
+    // Sadece gerekli alanları gönder (hesaplanan alanları çıkar)
+    const dataToSend = {
+      id: editingSourceChannel.id,
+      source_chat_id: editingSourceChannel.source_chat_id,
+      source_title: editingSourceChannel.source_title,
+      target_channel_id: editingSourceChannel.target_channel_id,
+      append_link: editingSourceChannel.append_link,
+      append_link_text: editingSourceChannel.append_link_text,
+      daily_limit: editingSourceChannel.daily_limit,
+      remove_links: editingSourceChannel.remove_links,
+      is_active: editingSourceChannel.is_active,
+      listen_type: editingSourceChannel.listen_type,
+      trigger_keywords: editingSourceChannel.trigger_keywords,
+      send_link_back: editingSourceChannel.send_link_back,
+    };
+
     setSaving(true);
     try {
       const method = editingSourceChannel.id ? 'PUT' : 'POST';
       const response = await fetch('/api/channels', {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editingSourceChannel),
+        body: JSON.stringify(dataToSend),
       });
 
       if (response.ok) {
@@ -536,8 +552,13 @@ export default function Dashboard() {
                             value={editingTargetChannel.chat_id || ''}
                             onChange={(e) => setEditingTargetChannel(prev => ({ ...prev, chat_id: e.target.value }))}
                             className="bg-zinc-800 border-zinc-700"
+                            disabled={!!editingTargetChannel.id}
                           />
-                          <p className="text-xs text-zinc-500">Kanalin ID&apos;si veya @kullaniciadi</p>
+                          <p className="text-xs text-zinc-500">
+                            {editingTargetChannel.id
+                              ? 'Kanal ID degistirilemez'
+                              : 'Kanalin ID\'si veya @kullaniciadi'}
+                          </p>
                         </div>
 
                         <div className="space-y-2">
@@ -690,8 +711,13 @@ export default function Dashboard() {
                               value={editingSourceChannel.source_chat_id || ''}
                               onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, source_chat_id: e.target.value }))}
                               className="bg-zinc-800 border-zinc-700"
+                              disabled={!!editingSourceChannel.id}
                             />
-                            <p className="text-xs text-zinc-500">Dinlenecek kanalin ID&apos;si</p>
+                            <p className="text-xs text-zinc-500">
+                              {editingSourceChannel.id
+                                ? 'Kanal ID degistirilemez'
+                                : 'Dinlenecek kanalin ID\'si'}
+                            </p>
                           </div>
 
                           <div className="space-y-2">
