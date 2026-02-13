@@ -72,6 +72,11 @@ export async function POST(request: Request) {
       send_link_back
     } = body;
 
+    // Validate source_chat_id
+    if (!source_chat_id || String(source_chat_id).replace(/[^0-9-]/g, '').length === 0) {
+      return NextResponse.json({ error: 'Kaynak Kanal ID gerekli' }, { status: 400 });
+    }
+
     // If target_channel_id is provided, get the target chat_id from target_channels
     let finalTargetChatId = target_chat_id;
     let finalTargetTitle = target_title;
@@ -141,10 +146,13 @@ export async function PUT(request: Request) {
     await ensureTableStructure();
 
     const body = await request.json();
+    console.log('PUT /api/channels - Gelen veri:', JSON.stringify(body, null, 2));
+
     const { id, target_channel_id, ...updates } = body;
 
     // ID doğrulaması
     if (!id) {
+      console.error('PUT /api/channels - HATA: Channel ID eksik');
       return NextResponse.json({ error: 'Channel ID is required' }, { status: 400 });
     }
 
