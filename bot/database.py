@@ -22,6 +22,19 @@ async def init_db():
             )
         ''')
 
+        # Target channels table (where messages are sent to)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS target_channels (
+                id SERIAL PRIMARY KEY,
+                chat_id VARCHAR(255) UNIQUE NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                username VARCHAR(255),
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Source channels/groups with their own settings
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS source_channels (
@@ -30,9 +43,10 @@ async def init_db():
                 source_title TEXT,
                 source_username TEXT,
                 target_chat_id BIGINT NOT NULL,
+                target_channel_id INTEGER,
                 target_title TEXT,
                 append_link TEXT DEFAULT '',
-                daily_limit INTEGER DEFAULT 4,
+                daily_limit INTEGER DEFAULT 10,
                 remove_links BOOLEAN DEFAULT TRUE,
                 remove_emojis BOOLEAN DEFAULT FALSE,
                 is_active BOOLEAN DEFAULT TRUE,
@@ -65,6 +79,14 @@ async def init_db():
             await conn.execute('''
                 ALTER TABLE source_channels
                 ADD COLUMN IF NOT EXISTS send_link_back BOOLEAN DEFAULT FALSE
+            ''')
+        except Exception:
+            pass
+
+        try:
+            await conn.execute('''
+                ALTER TABLE source_channels
+                ADD COLUMN IF NOT EXISTS target_channel_id INTEGER
             ''')
         except Exception:
             pass
@@ -152,6 +174,25 @@ async def is_bot_enabled() -> bool:
     return val == 'true'
 
 
+# ============== TARGET CHANNELS ==============
+
+async def get_target_channel(channel_id: int) -> Optional[Dict[str, Any]]:
+    """Get a target channel by ID"""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            'SELECT * FROM target_channels WHERE id = $1 AND is_active = TRUE',
+            channel_id
+        )
+        return dict(row) if row else None
+
+
+async def get_all_target_channels() -> List[Dict[str, Any]]:
+    """Get all target channels"""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT * FROM target_channels WHERE is_active = TRUE ORDER BY created_at DESC')
+        return [dict(row) for row in rows]
+
+
 # ============== SOURCE CHANNELS ==============
 
 async def add_source_channel(
@@ -161,12 +202,13 @@ async def add_source_channel(
     source_username: str = None,
     target_title: str = None,
     append_link: str = '',
-    daily_limit: int = 4,
+    daily_limit: int = 10,
     remove_links: bool = True,
     remove_emojis: bool = False,
     listen_type: str = 'direct',
     trigger_keywords: str = '',
-    send_link_back: bool = False
+    send_link_back: bool = False,
+    target_channel_id: int = None
 ) -> int:
     """Add or update a source channel configuration"""
     async with pool.acquire() as conn:
@@ -174,8 +216,8 @@ async def add_source_channel(
             INSERT INTO source_channels
             (source_chat_id, target_chat_id, source_title, source_username,
              target_title, append_link, daily_limit, remove_links, remove_emojis,
-             listen_type, trigger_keywords, send_link_back)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             listen_type, trigger_keywords, send_link_back, target_channel_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (source_chat_id) DO UPDATE SET
                 target_chat_id = $2,
                 source_title = COALESCE($3, source_channels.source_title),
@@ -188,11 +230,12 @@ async def add_source_channel(
                 listen_type = $10,
                 trigger_keywords = $11,
                 send_link_back = $12,
+                target_channel_id = $13,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id
         ''', source_chat_id, target_chat_id, source_title, source_username,
             target_title, append_link, daily_limit, remove_links, remove_emojis,
-            listen_type, trigger_keywords, send_link_back)
+            listen_type, trigger_keywords, send_link_back, target_channel_id)
         return row['id']
 
 
@@ -206,7 +249,8 @@ async def update_source_channel(
     is_active: bool = None,
     listen_type: str = None,
     trigger_keywords: str = None,
-    send_link_back: bool = None
+    send_link_back: bool = None,
+    target_channel_id: int = None
 ):
     """Update source channel settings"""
     async with pool.acquire() as conn:
@@ -249,6 +293,10 @@ async def update_source_channel(
         if send_link_back is not None:
             updates.append(f"send_link_back = ${idx}")
             values.append(send_link_back)
+            idx += 1
+        if target_channel_id is not None:
+            updates.append(f"target_channel_id = ${idx}")
+            values.append(target_channel_id)
             idx += 1
 
         if updates:
