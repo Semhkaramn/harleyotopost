@@ -98,7 +98,7 @@ def process_message_for_forwarding(text: str, entities: list, remove_links: bool
     Process message for forwarding.
 
     If remove_links=False: Return original text and entities unchanged
-    If remove_links=True: Remove hyperlinked text, URLs, mentions and adjust entities
+    If remove_links=True: Remove hyperlinked text (including anchor text), URLs, mentions and adjust entities
 
     Returns: (processed_text, processed_entities)
     """
@@ -117,17 +117,19 @@ def process_message_for_forwarding(text: str, entities: list, remove_links: bool
         cleaned = re.sub(r' {2,}', ' ', cleaned)
         return cleaned.strip(), []
 
-    # Entity'leri analiz et - hangileri link, hangileri tutulacak
-    link_ranges = []  # (start, end) - kaldırılacak aralıklar
-    keep_entities = []  # Tutulacak entity'ler
+    # 1. Adım: Kaldırılacak aralıkları belirle (UTF-16 offset olarak)
+    removal_ranges = []  # (start, end) - kaldırılacak karakter aralıkları
 
     for entity in entities:
-        if isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
-            # Bu bir link/mention - kaldırılacak
-            link_ranges.append((entity.offset, entity.offset + entity.length))
-        else:
-            # Bu tutulacak (bold, italic, custom emoji, vs.)
-            keep_entities.append(entity)
+        # Text URL - tıklanabilir linkler (anchor text'i de dahil silmeliyiz)
+        if isinstance(entity, MessageEntityTextUrl):
+            removal_ranges.append((entity.offset, entity.offset + entity.length))
+        # Düz URL'ler
+        elif isinstance(entity, MessageEntityUrl):
+            removal_ranges.append((entity.offset, entity.offset + entity.length))
+        # Mention'lar (@username)
+        elif isinstance(entity, MessageEntityMention):
+            removal_ranges.append((entity.offset, entity.offset + entity.length))
 
     # Plain URL'leri de bul (entity olmayan)
     for match in URL_PATTERN.finditer(text):
@@ -135,38 +137,46 @@ def process_message_for_forwarding(text: str, entities: list, remove_links: bool
         end_utf16 = start_utf16 + utf16_len(match.group())
 
         # Zaten eklenmiş mi kontrol et
-        already_added = False
-        for r_start, r_end in link_ranges:
+        already_covered = False
+        for r_start, r_end in removal_ranges:
             if r_start <= start_utf16 and r_end >= end_utf16:
-                already_added = True
+                already_covered = True
                 break
 
-        if not already_added:
-            link_ranges.append((start_utf16, end_utf16))
+        if not already_covered:
+            removal_ranges.append((start_utf16, end_utf16))
 
-    if not link_ranges:
-        # Kaldırılacak link yok
+    # Kaldırılacak bir şey yoksa orijinal entity'leri döndür
+    if not removal_ranges:
         cleaned = re.sub(r'\n{3,}', '\n\n', text)
         cleaned = re.sub(r' {2,}', ' ', cleaned)
-        return cleaned.strip(), entities
+        return cleaned.strip(), list(entities)
 
-    # Aralıkları sırala ve birleştir
-    link_ranges.sort(key=lambda x: x[0])
+    # 2. Adım: Aralıkları sırala ve birleştir (overlapping aralıkları birleştir)
+    removal_ranges.sort(key=lambda x: x[0])
     merged_ranges = []
-    for start, end in link_ranges:
-        if merged_ranges and start <= merged_ranges[-1][1] + 1:
+    for start, end in removal_ranges:
+        if merged_ranges and start <= merged_ranges[-1][1]:
+            # Overlap var, birleştir
             merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
         else:
             merged_ranges.append((start, end))
 
-    # Yeni text oluştur - link olmayan parçaları birleştir
+    # 3. Adım: Tutulacak entity'leri belirle (link olmayanlar)
+    keep_entities = []
+    for entity in entities:
+        if isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
+            continue  # Bu entity'ler kaldırılacak
+        # Diğer entity'ler tutulacak: Custom Emoji, Bold, Italic, Code, Pre, Strike, Underline, Spoiler, Blockquote
+        keep_entities.append(entity)
+
+    # 4. Adım: Yeni text oluştur - kaldırılan aralıklar hariç
     text_utf16_len = utf16_len(text)
     new_text_parts = []
     last_end = 0
 
     for r_start, r_end in merged_ranges:
         if last_end < r_start:
-            # Link öncesi kısmı ekle
             part = utf16_substring(text, last_end, r_start)
             new_text_parts.append(part)
         last_end = r_end
@@ -178,89 +188,177 @@ def process_message_for_forwarding(text: str, entities: list, remove_links: bool
 
     new_text = ''.join(new_text_parts)
 
-    # Entity offset'lerini ayarla
+    # 5. Adım: Entity offset'lerini yeniden hesapla
+    # Her konum için, o konumdan önce kaç karakter silindiğini hesapla
+    def calculate_shift(position: int) -> int:
+        """Belirli bir pozisyondan önce silinen karakter sayısını hesapla"""
+        shift = 0
+        for r_start, r_end in merged_ranges:
+            if r_end <= position:
+                # Bu aralık tamamen pozisyondan önce
+                shift += (r_end - r_start)
+            elif r_start < position:
+                # Pozisyon bu aralığın içinde
+                shift += (position - r_start)
+        return shift
+
     adjusted_entities = []
 
     for entity in keep_entities:
         orig_start = entity.offset
         orig_end = orig_start + entity.length
 
-        # Entity link aralığı içinde mi?
-        is_inside_link = False
+        # Entity'nin kaldırılan bir aralıkla çakışıp çakışmadığını kontrol et
+        entity_valid = True
         for r_start, r_end in merged_ranges:
-            if r_start <= orig_start < r_end or r_start < orig_end <= r_end:
-                is_inside_link = True
+            # Entity tamamen kaldırılan aralık içinde mi?
+            if r_start <= orig_start and orig_end <= r_end:
+                entity_valid = False
                 break
-            if orig_start <= r_start and orig_end >= r_end:
-                # Entity link aralığını kapsıyor - karmaşık durum, atla
-                is_inside_link = True
+            # Entity kaldırılan aralıkla kısmen çakışıyor mu?
+            if (r_start < orig_end and r_end > orig_start):
+                # Kısmi çakışma - entity'yi atla (karmaşık durum)
+                entity_valid = False
                 break
 
-        if is_inside_link:
+        if not entity_valid:
             continue
 
-        # Yeni offset hesapla - önceki kaldırılan karakterleri çıkar
-        shift = 0
-        for r_start, r_end in merged_ranges:
-            if r_end <= orig_start:
-                shift += (r_end - r_start)
+        # Yeni offset hesapla
+        new_start = orig_start - calculate_shift(orig_start)
+        new_end = orig_end - calculate_shift(orig_end)
+        new_length = new_end - new_start
 
-        new_offset = orig_start - shift
+        # Geçerlilik kontrolü
+        new_text_len = utf16_len(new_text)
+        if new_start < 0 or new_length <= 0 or new_start >= new_text_len:
+            continue
 
-        if new_offset >= 0 and new_offset < utf16_len(new_text):
-            # Entity'yi yeniden oluştur (yeni offset ile)
+        # Length'i sınırla
+        if new_start + new_length > new_text_len:
+            new_length = new_text_len - new_start
+            if new_length <= 0:
+                continue
+
+        # Entity'yi yeniden oluştur
+        try:
             if isinstance(entity, MessageEntityCustomEmoji):
                 adjusted_entities.append(MessageEntityCustomEmoji(
-                    offset=new_offset,
-                    length=entity.length,
+                    offset=new_start,
+                    length=new_length,
                     document_id=entity.document_id
                 ))
             elif isinstance(entity, MessageEntityBold):
                 adjusted_entities.append(MessageEntityBold(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
             elif isinstance(entity, MessageEntityItalic):
                 adjusted_entities.append(MessageEntityItalic(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
             elif isinstance(entity, MessageEntityCode):
                 adjusted_entities.append(MessageEntityCode(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
             elif isinstance(entity, MessageEntityPre):
                 adjusted_entities.append(MessageEntityPre(
-                    offset=new_offset,
-                    length=entity.length,
+                    offset=new_start,
+                    length=new_length,
                     language=getattr(entity, 'language', '')
                 ))
             elif isinstance(entity, MessageEntityStrike):
                 adjusted_entities.append(MessageEntityStrike(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
             elif isinstance(entity, MessageEntityUnderline):
                 adjusted_entities.append(MessageEntityUnderline(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
             elif isinstance(entity, MessageEntitySpoiler):
                 adjusted_entities.append(MessageEntitySpoiler(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
             elif isinstance(entity, MessageEntityBlockquote):
                 adjusted_entities.append(MessageEntityBlockquote(
-                    offset=new_offset,
-                    length=entity.length
+                    offset=new_start,
+                    length=new_length
                 ))
+        except Exception as e:
+            logger.warning(f"Could not adjust entity {type(entity)}: {e}")
+            continue
 
-    # Temizlik
+    # 6. Adım: Temizlik
     new_text = re.sub(r'\n{3,}', '\n\n', new_text)
     new_text = re.sub(r' {2,}', ' ', new_text)
     new_text = new_text.strip()
+
+    # Final entity offset kontrolü - strip sonrası
+    # Strip baştan kaç karakter kaldırdıysa offset'leri güncelle
+    original_new_text = ''.join(new_text_parts)
+    stripped_start = len(original_new_text) - len(original_new_text.lstrip())
+
+    if stripped_start > 0:
+        final_entities = []
+        for entity in adjusted_entities:
+            new_offset = entity.offset - stripped_start
+            if new_offset >= 0 and new_offset < utf16_len(new_text):
+                try:
+                    if isinstance(entity, MessageEntityCustomEmoji):
+                        final_entities.append(MessageEntityCustomEmoji(
+                            offset=new_offset,
+                            length=entity.length,
+                            document_id=entity.document_id
+                        ))
+                    elif isinstance(entity, MessageEntityBold):
+                        final_entities.append(MessageEntityBold(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                    elif isinstance(entity, MessageEntityItalic):
+                        final_entities.append(MessageEntityItalic(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                    elif isinstance(entity, MessageEntityCode):
+                        final_entities.append(MessageEntityCode(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                    elif isinstance(entity, MessageEntityPre):
+                        final_entities.append(MessageEntityPre(
+                            offset=new_offset,
+                            length=entity.length,
+                            language=getattr(entity, 'language', '')
+                        ))
+                    elif isinstance(entity, MessageEntityStrike):
+                        final_entities.append(MessageEntityStrike(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                    elif isinstance(entity, MessageEntityUnderline):
+                        final_entities.append(MessageEntityUnderline(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                    elif isinstance(entity, MessageEntitySpoiler):
+                        final_entities.append(MessageEntitySpoiler(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                    elif isinstance(entity, MessageEntityBlockquote):
+                        final_entities.append(MessageEntityBlockquote(
+                            offset=new_offset,
+                            length=entity.length
+                        ))
+                except Exception:
+                    continue
+        adjusted_entities = final_entities
 
     return new_text, adjusted_entities
 
@@ -338,19 +436,41 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             logger.info(f"Message {message.id} skipped - no matching trigger keywords")
             return False
 
-        # Log entity info
+        # Log entity info - detaylı
         custom_emoji_count = sum(1 for e in original_entities if isinstance(e, MessageEntityCustomEmoji))
-        logger.info(f"Original message - entities: {len(original_entities)}, custom emojis: {custom_emoji_count}")
+        bold_count = sum(1 for e in original_entities if isinstance(e, MessageEntityBold))
+        italic_count = sum(1 for e in original_entities if isinstance(e, MessageEntityItalic))
+        text_url_count = sum(1 for e in original_entities if isinstance(e, MessageEntityTextUrl))
+
+        logger.info(f"📥 Original message - total entities: {len(original_entities)}")
+        logger.info(f"   - Custom emojis: {custom_emoji_count}, Bold: {bold_count}, Italic: {italic_count}, Text URLs: {text_url_count}")
+
+        # Debug: Entity detaylarını göster
+        for i, e in enumerate(original_entities):
+            entity_type = type(e).__name__
+            if isinstance(e, MessageEntityCustomEmoji):
+                logger.debug(f"   Entity {i}: {entity_type} offset={e.offset} length={e.length} doc_id={e.document_id}")
+            elif isinstance(e, MessageEntityTextUrl):
+                logger.debug(f"   Entity {i}: {entity_type} offset={e.offset} length={e.length} url={e.url[:30]}...")
+            else:
+                logger.debug(f"   Entity {i}: {entity_type} offset={e.offset} length={e.length}")
 
         if custom_emoji_count > 0 and not is_premium_account:
-            logger.warning("⚠️ Custom emojis detected but account is not premium - some emojis may not work")
+            logger.warning("⚠️ Custom emojis detected but account is not premium - emojis will be converted to static")
 
         # Process message (remove links if enabled)
         if remove_links:
             final_text, final_entities = process_message_for_forwarding(
                 original_text, list(original_entities), remove_links=True
             )
-            logger.info(f"After link removal - text length: {len(final_text)}, entities: {len(final_entities)}")
+
+            # İşlem sonrası entity detayları
+            final_custom_emoji_count = sum(1 for e in final_entities if isinstance(e, MessageEntityCustomEmoji))
+            final_bold_count = sum(1 for e in final_entities if isinstance(e, MessageEntityBold))
+            final_italic_count = sum(1 for e in final_entities if isinstance(e, MessageEntityItalic))
+
+            logger.info(f"📤 After processing - text length: {len(final_text)}, total entities: {len(final_entities)}")
+            logger.info(f"   - Custom emojis: {final_custom_emoji_count}, Bold: {final_bold_count}, Italic: {final_italic_count}")
         else:
             # Link kaldırma kapalı - orijinali aynen kullan
             final_text = original_text
