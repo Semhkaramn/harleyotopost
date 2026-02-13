@@ -67,7 +67,6 @@ export async function POST(request: Request) {
       append_link_text,
       daily_limit,
       remove_links,
-      remove_emojis,
       listen_type,
       trigger_keywords,
       send_link_back
@@ -95,9 +94,9 @@ export async function POST(request: Request) {
     const result = await query(
       `INSERT INTO source_channels
        (source_chat_id, target_chat_id, target_channel_id, source_title, source_username,
-        target_title, append_link, append_link_text, daily_limit, remove_links, remove_emojis,
+        target_title, append_link, append_link_text, daily_limit, remove_links,
         listen_type, trigger_keywords, send_link_back)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (source_chat_id) DO UPDATE SET
          target_chat_id = $2,
          target_channel_id = $3,
@@ -108,10 +107,9 @@ export async function POST(request: Request) {
          append_link_text = $8,
          daily_limit = $9,
          remove_links = $10,
-         remove_emojis = $11,
-         listen_type = $12,
-         trigger_keywords = $13,
-         send_link_back = $14,
+         listen_type = $11,
+         trigger_keywords = $12,
+         send_link_back = $13,
          updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [
@@ -125,7 +123,6 @@ export async function POST(request: Request) {
         append_link_text || '',
         daily_limit || 4,
         remove_links !== false,
-        remove_emojis === true,
         listen_type || 'direct',
         trigger_keywords || '',
         send_link_back === true
@@ -187,7 +184,7 @@ export async function PUT(request: Request) {
     const allowedFields = [
       'source_title', 'source_username',
       'target_chat_id', 'target_title',
-      'append_link', 'append_link_text', 'daily_limit', 'remove_links', 'remove_emojis', 'is_active',
+      'append_link', 'append_link_text', 'daily_limit', 'remove_links', 'is_active',
       'listen_type', 'trigger_keywords', 'send_link_back'
     ];
 
