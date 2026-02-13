@@ -1,40 +1,57 @@
 # Telegram Forwarder Project
 
 ## TODO
-- [ ] Web Dashboard (Next.js)
-  - [ ] UI Components (Button, Card, Input, etc.)
-  - [ ] Dashboard page with settings
-  - [ ] API routes for bot communication
-  - [ ] Statistics page
-  - [ ] Post history
-- [ ] Telegram Bot (Python/Telethon)
-  - [ ] Main bot script
-  - [ ] Message forwarding logic
-  - [ ] Link extraction and cleaning
-  - [ ] Daily limit system
-  - [ ] Database models
-- [ ] Database schema (Neon.tech PostgreSQL)
-- [ ] Heroku deployment files
-- [ ] Environment configuration
+- [x] Web Dashboard (Next.js)
+  - [x] UI Components (Button, Card, Input, etc.)
+  - [x] Dashboard page with settings
+  - [x] API routes for bot communication
+  - [x] Statistics page
+  - [x] Post history
+- [x] Telegram Bot (Python/Telethon)
+  - [x] Main bot script
+  - [x] Message forwarding logic
+  - [x] Link extraction and cleaning
+  - [x] Daily limit system
+  - [x] Database models
+- [x] Database schema (Neon.tech PostgreSQL)
+- [x] Heroku deployment files
+- [x] Environment configuration
+
+## In Progress
+- [ ] Tetikleyici kelime/cümle sistemi ekleme
+- [ ] Dinleme türü seçeneği (link ile / normal)
+- [ ] Post sonrası link geri gönderme seçeneği
+- [ ] UI'da Kanal Yönetimi sayfası
+- [ ] API'lar ile gerçek veri bağlantısı
 
 ## Architecture
 - `/src` - Next.js web dashboard (Netlify)
 - `/bot` - Python Telethon bot (Heroku)
 - Shared Neon.tech PostgreSQL database
 
-Kullanıcı hem Telethon ile çalışan bir Telegram botu hem de Netlify'da ayarlar için bir web arayüzü istiyor. Tek bir GitHub repo'sunda olacak.
+## Sistem Özellikleri
+1. Hedef kanal ekleme (normal ID ile)
+2. Dinleme kanalı ekleme (link ile veya normal seçenek)
+3. Tetikleyici kelime/cümle sistemi - sadece bu kelimeler içeren postlar alınacak
+4. Link ekleme - postların sonuna eklenen link
+5. Link temizleme - gelen postlardaki linkleri kaldır
+6. Post sonrası link gönderme - hedef kanala attıktan sonra mesaj linkini dinleme kanalına gönder
+7. Günlük post limiti - her dinleme kanalı için ayrı
+8. İstatistikler
 
-Yapı şöyle olacak:
+Kullanıcı şunları istiyor:
 
-Telegram Bot (Python/Telethon) - Heroku'da çalışacak
-Web Dashboard (Next.js) - Netlify'da çalışacak, ayarlar için
-Bunları tek bir projede birleştirmemiz gerekiyor. Web sitesi ile bot ayarlarını yönetebilecek:
+Shadcn bileşenlerini kendim yazmamı (CLI kullanmadan)
+Günlük limit sabit 4 değil, kullanıcı kendisi seçecek
+Hedef kanalları ayrı olarak ekleyecek, sonra dinleme kanalı eklerken mevcut hedef kanallar arasından seçecek
+Yani iki farklı yapı olacak:
 
-Günlük post limiti
-Hedef kanal
-Eklenecek link
-İstatistikler vs.
-Veritabanı olarak Neon.tech PostgreSQL kullanılacak - her iki sistem de aynı veritabanına bağlanacak.
+Hedef Kanallar: Sadece hedef kanal ID ve ismi
+Dinleme Kanalları: Kaynak kanal + hedef kanal seçimi (dropdown) + diğer ayarlar
+Önce select ve dialog bileşenlerini düzelteyim, sonra yapıyı değiştireyim.
 
-Bu güzel bir proje. Başlayalım.
-sistem şu şekilde çalışacak hedef kanal ekleceğim normal id ile vs sonra dinleme kanalı ekleyeceğim link ile mi yoksa normal mi diye seçenek olacak link ile seçince normal telegram mesaj bağlantı linki gelince o bağlantıdaki mesjaı alıp atacak gibi normal seçince o kanala gelen direk postu atacak mesajda tetikleyici kelime veya cümle ekleceğim o varsa o postu alıp atacak sonra link ekleme yeri olacak oradan gelen postlar vs mesajın sonunda o link eklenecek ve mesajda postlarda linkler vs varsa kaldırılacak eğer link ve genel seçeneğinde linki seçersem postu hedef kanala attıktan sonra o postun mesaj bağlantısını alıp dinlenen kanala atacak dinlenen kanal eklerken post limiti de eklenecek projeme devam et oku ve eksikleri tamamla
+Anlıyorum! Şimdi:
+
+Bileşenleri kendim yazacağım
+Günlük limit kullanıcının seçeceği şekilde olacak
+Önce hedef kanallar eklenecek, sonra dinleme kanalı eklerken hedef kanallar listesinden seçilecek
