@@ -3,6 +3,7 @@ import re
 import logging
 import signal
 import sys
+import copy
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import (
@@ -11,6 +12,15 @@ from telethon.tl.types import (
     MessageEntityTextUrl,
     MessageEntityUrl,
     MessageEntityMention,
+    MessageEntityCustomEmoji,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
+    MessageEntityPre,
+    MessageEntityUnderline,
+    MessageEntityStrike,
+    MessageEntitySpoiler,
+    MessageEntityBlockquote,
 )
 from telethon.errors import (
     FloodWaitError,
@@ -65,55 +75,122 @@ def create_client():
     )
 
 
-def remove_links_from_text(text: str, entities: list) -> str:
+def remove_links_from_text(text: str, entities: list) -> tuple:
     """
-    Metinden linkleri kaldır.
-    Entity'lerdeki TextUrl, Url, Mention'ların kapladığı metinleri sil.
-    Ayrıca regex ile bulunan URL'leri de sil.
+    Metinden linkleri kaldır ama formatting entity'lerini koru.
+    Returns: (cleaned_text, cleaned_entities)
+
+    Formatting entity tipleri (korunacak):
+    - MessageEntityBold, MessageEntityItalic, MessageEntityCode
+    - MessageEntityPre, MessageEntityUnderline, MessageEntityStrike
+    - MessageEntitySpoiler, MessageEntityCustomEmoji, MessageEntityBlockquote
+
+    Link entity tipleri (kaldırılacak):
+    - MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention
     """
     if not text:
-        return text
+        return text, []
 
     if not entities:
         # Entity yok, sadece regex ile URL'leri temizle
         cleaned = URL_PATTERN.sub('', text)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         cleaned = re.sub(r' {2,}', ' ', cleaned)
-        return cleaned.strip()
+        return cleaned.strip(), []
 
-    # Link entity'lerinin kapladığı aralıkları bul (byte pozisyonları)
-    # Telegram UTF-16 kullanıyor
-    removal_ranges = []
+    # Deep copy ile entity'leri kopyala (orijinalleri değiştirmemek için)
+    entities_copy = copy.deepcopy(entities)
 
-    for entity in entities:
+    # Link entity'lerinin kapladığı aralıkları bul
+    link_ranges = []
+    formatting_entities = []
+
+    # Link olmayan entity tipleri
+    FORMATTING_TYPES = (
+        MessageEntityBold, MessageEntityItalic, MessageEntityCode,
+        MessageEntityPre, MessageEntityUnderline, MessageEntityStrike,
+        MessageEntitySpoiler, MessageEntityCustomEmoji, MessageEntityBlockquote
+    )
+
+    for entity in entities_copy:
         if isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
-            # UTF-16 offset'leri byte pozisyonuna çevir
-            removal_ranges.append((entity.offset, entity.offset + entity.length))
+            link_ranges.append((entity.offset, entity.offset + entity.length))
+        elif isinstance(entity, FORMATTING_TYPES):
+            # Formatting entity'lerini koru
+            formatting_entities.append(entity)
+        # Diğer bilinmeyen entity'leri de koru
+        elif not isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
+            formatting_entities.append(entity)
+
+    if not link_ranges:
+        # Link yok, regex ile temizle
+        # NOT: Regex temizliği entity offset'lerini bozabilir, dikkatli ol
+        new_text = text
+        # Sadece entity ile kapsanmayan URL'leri temizle
+        # Bu durumda entity'lerin bozulmaması için regex temizliğini atla
+        new_text = re.sub(r'\n{3,}', '\n\n', new_text)
+        new_text = re.sub(r' {2,}', ' ', new_text)
+        return new_text.strip(), formatting_entities
 
     # Aralıkları sırala (sondan başa doğru silmek için ters sırala)
-    removal_ranges.sort(key=lambda x: x[0], reverse=True)
+    link_ranges.sort(key=lambda x: x[0], reverse=True)
 
-    # Metni UTF-16 olarak encode et
-    text_utf16 = text.encode('utf-16-le')
+    # Her aralığı sil ve entity offset'lerini güncelle
+    # UTF-16 code units olarak çalış (Telegram entity offset'leri UTF-16 kullanır)
+    current_text = text
 
-    # Her aralığı sil (sondan başa)
-    for start, end in removal_ranges:
+    for start, end in link_ranges:
+        removed_length = end - start
+
+        # UTF-16 offset'leri Python string index'lerine çevir
+        text_utf16 = current_text.encode('utf-16-le')
         start_byte = start * 2
         end_byte = end * 2
-        if start_byte < len(text_utf16) and end_byte <= len(text_utf16):
+
+        if start_byte <= len(text_utf16) and end_byte <= len(text_utf16):
+            # Metni kes
             text_utf16 = text_utf16[:start_byte] + text_utf16[end_byte:]
+            current_text = text_utf16.decode('utf-16-le', errors='ignore')
 
-    # Geri decode et
-    new_text = text_utf16.decode('utf-16-le', errors='ignore')
+            # Formatting entity'lerinin offset'lerini güncelle
+            new_formatting_entities = []
+            for entity in formatting_entities:
+                entity_end = entity.offset + entity.length
 
-    # Regex ile kalan URL'leri de temizle
-    new_text = URL_PATTERN.sub('', new_text)
+                if entity.offset >= end:
+                    # Entity tamamen silinen kısımdan sonra, offset'i azalt
+                    entity.offset -= removed_length
+                    new_formatting_entities.append(entity)
+                elif entity_end <= start:
+                    # Entity tamamen silinen kısımdan önce, değişiklik yok
+                    new_formatting_entities.append(entity)
+                elif entity.offset < start and entity_end > end:
+                    # Entity silinen kısmı tamamen kapsıyor, length'i azalt
+                    entity.length -= removed_length
+                    new_formatting_entities.append(entity)
+                elif entity.offset >= start and entity_end <= end:
+                    # Entity tamamen silinen kısımda, entity'yi atla
+                    pass
+                elif entity.offset < start and entity_end > start and entity_end <= end:
+                    # Entity'nin sonu silinen kısımda
+                    entity.length = start - entity.offset
+                    if entity.length > 0:
+                        new_formatting_entities.append(entity)
+                elif entity.offset >= start and entity.offset < end and entity_end > end:
+                    # Entity'nin başı silinen kısımda
+                    new_length = entity_end - end
+                    entity.offset = start
+                    entity.length = new_length
+                    if entity.length > 0:
+                        new_formatting_entities.append(entity)
+
+            formatting_entities = new_formatting_entities
 
     # Temizlik
-    new_text = re.sub(r'\n{3,}', '\n\n', new_text)
-    new_text = re.sub(r' {2,}', ' ', new_text)
+    current_text = re.sub(r'\n{3,}', '\n\n', current_text)
+    current_text = re.sub(r' {2,}', ' ', current_text)
 
-    return new_text.strip()
+    return current_text.strip(), formatting_entities
 
 
 def append_link_to_text(text: str, link: str) -> str:
@@ -185,14 +262,16 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
 
         # Link kaldırma işlemi
         if remove_links:
-            # Linkleri kaldır, entity kullanma (düz metin olarak gönder)
-            final_text = remove_links_from_text(original_text, original_entities)
-            final_entities = None  # Entity kullanma
-            logger.info(f"Links removed - original: {len(original_text)} chars, final: {len(final_text)} chars")
+            # Linkleri kaldır ama formatting entity'lerini koru
+            final_text, final_entities = remove_links_from_text(original_text, original_entities)
+            # Boş liste yerine None kullan
+            if not final_entities:
+                final_entities = None
+            logger.info(f"Links removed - original: {len(original_text)} chars, final: {len(final_text)} chars, entities kept: {len(final_entities) if final_entities else 0}")
         else:
-            # Link kaldırma kapalı - orijinali aynen kullan
+            # Link kaldırma kapalı - orijinali aynen kullan (deep copy ile)
             final_text = original_text
-            final_entities = original_entities
+            final_entities = copy.deepcopy(original_entities) if original_entities else None
 
         # Append link
         if append_link:
@@ -228,19 +307,43 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
                 link_preview=False
             )
 
-        # Source link oluştur
+        # Source link oluştur - username varsa onu kullan
         source_chat_id = message.chat_id
-        if str(source_chat_id).startswith('-100'):
-            source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
-        else:
-            source_link = f"t.me/{source_chat_id}/{message.id}"
+        try:
+            source_entity = await client.get_entity(source_chat_id)
+            source_username = getattr(source_entity, 'username', None)
+            if source_username:
+                source_link = f"t.me/{source_username}/{message.id}"
+            elif str(source_chat_id).startswith('-100'):
+                source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
+            else:
+                source_link = f"t.me/{source_chat_id}/{message.id}"
+        except Exception as e:
+            logger.warning(f"Could not get source entity for link: {e}")
+            if str(source_chat_id).startswith('-100'):
+                source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
+            else:
+                source_link = f"t.me/{source_chat_id}/{message.id}"
 
-        # Target link oluştur
+        # Target link oluştur - username varsa onu kullan
         target_link = None
-        if str(target_chat_id).startswith('-100'):
-            target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
-        else:
-            target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
+        try:
+            target_entity = await client.get_entity(target_chat_id)
+            target_username = getattr(target_entity, 'username', None)
+            if target_username:
+                # Public channel - username ile link
+                target_link = f"https://t.me/{target_username}/{sent_message.id}"
+            elif str(target_chat_id).startswith('-100'):
+                # Private channel - /c/ formatı
+                target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
+            else:
+                target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
+        except Exception as e:
+            logger.warning(f"Could not get target entity for link: {e}")
+            if str(target_chat_id).startswith('-100'):
+                target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
+            else:
+                target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
 
         # Send link back
         if send_link_back and source_event_chat_id and target_link:
