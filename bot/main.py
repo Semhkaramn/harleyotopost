@@ -12,7 +12,6 @@ from telethon.tl.types import (
 from telethon.errors import (
     FloodWaitError,
     ChatWriteForbiddenError,
-    SessionPasswordNeededError,
     AuthKeyUnregisteredError,
     UserDeactivatedBanError
 )
@@ -44,15 +43,14 @@ TELEGRAM_LINK_PATTERN = re.compile(
 
 
 def create_client():
-    """Create Telegram client with appropriate session type"""
-    # Check if SESSION_STRING is provided (recommended for cloud deployments)
-    if config.SESSION_STRING:
-        logger.info("Using StringSession (cloud mode)")
-        session = StringSession(config.SESSION_STRING)
-    else:
-        # Fallback to file-based session (local development)
-        logger.info(f"Using file-based session: {config.SESSION_NAME}")
-        session = config.SESSION_NAME
+    """Create Telegram client with StringSession"""
+    if not config.SESSION_STRING:
+        logger.error("SESSION_STRING is required!")
+        logger.error("Run: python generate_session.py to create one")
+        sys.exit(1)
+
+    logger.info("Using StringSession")
+    session = StringSession(config.SESSION_STRING)
 
     return TelegramClient(
         session,
@@ -455,37 +453,18 @@ def setup_signal_handlers(loop):
 
 
 async def start_client():
-    """Start the Telegram client with proper authentication"""
+    """Start the Telegram client with StringSession"""
     global client
 
-    # Using StringSession - client should already be authenticated
-    if config.SESSION_STRING:
-        logger.info("Connecting with StringSession...")
-        await client.connect()
+    logger.info("Connecting with StringSession...")
+    await client.connect()
 
-        if not await client.is_user_authorized():
-            logger.error("Session is not authorized! Please generate a new session string.")
-            logger.error("Run: python generate_session.py")
-            raise AuthKeyUnregisteredError("Session expired or invalid")
+    if not await client.is_user_authorized():
+        logger.error("Session is not authorized! Please generate a new session string.")
+        logger.error("Run: python generate_session.py")
+        raise AuthKeyUnregisteredError("Session expired or invalid")
 
-        logger.info("Successfully connected with StringSession")
-    else:
-        # File-based session - may need interactive login (local development only)
-        logger.info("Connecting with file-based session...")
-
-        if not config.PHONE_NUMBER:
-            logger.error("PHONE_NUMBER is required for file-based session!")
-            logger.error("Set PHONE_NUMBER in .env or use SESSION_STRING instead")
-            raise ValueError("Missing PHONE_NUMBER configuration")
-
-        try:
-            await client.start(phone=config.PHONE_NUMBER)
-            logger.info("Successfully connected with file-based session")
-        except SessionPasswordNeededError:
-            logger.error("Two-factor authentication is enabled!")
-            logger.error("Please use generate_session.py to create a session string")
-            raise
-
+    logger.info("Successfully connected with StringSession")
     return client
 
 
@@ -507,10 +486,9 @@ async def main():
         logger.error("DATABASE_URL is required!")
         sys.exit(1)
 
-    if not config.SESSION_STRING and not config.PHONE_NUMBER:
-        logger.error("Either SESSION_STRING or PHONE_NUMBER is required!")
-        logger.error("For cloud deployment: Use SESSION_STRING")
-        logger.error("For local development: Use PHONE_NUMBER")
+    if not config.SESSION_STRING:
+        logger.error("SESSION_STRING is required!")
+        logger.error("Run: python generate_session.py to create one")
         sys.exit(1)
 
     # Initialize database
