@@ -401,13 +401,6 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             else:
                 target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
 
-        # Send link back
-        if send_link_back and source_event_chat_id and target_link:
-            try:
-                await client.send_message(source_event_chat_id, target_link)
-            except Exception:
-                pass
-
         # Database'e kaydet
         await db.add_post(
             source_channel_id=source_channel_config['id'],
@@ -421,6 +414,23 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             media_type=media_type,
             status='success'
         )
+
+        # Send link back (mesaj bağlantısı + kalan post hakkı) - DB kaydından sonra
+        if send_link_back and source_event_chat_id and target_link:
+            try:
+                # Kalan post hakkını hesapla (DB'ye kaydedildikten sonra doğru değer)
+                remaining_posts = await db.get_remaining_posts_today(source_channel_config['id'])
+
+                # Geri bildirim mesajı oluştur (link_preview kapalı)
+                feedback_message = f"✅ Post gönderildi!\n\n📤 Post Bağlantısı: {target_link}\n📊 Kalan Kalan Post Hakkınız: {remaining_posts}"
+
+                await client.send_message(
+                    source_event_chat_id,
+                    feedback_message,
+                    link_preview=False
+                )
+            except Exception:
+                pass
 
         logger.info(f"✅ {message.id} -> {target_link}")
         return True
@@ -478,6 +488,16 @@ async def handle_telegram_link(event, link: str):
 
         can_post = await db.can_post_today(source_channel['id'])
         if not can_post:
+            # Limit aşıldığında kullanıcıya bildir
+            if source_channel.get('send_link_back', False):
+                try:
+                    await client.send_message(
+                        event.chat_id,
+                        "⚠️ Günlük post limitiniz doldu. Yarın tekrar deneyin.",
+                        link_preview=False
+                    )
+                except Exception:
+                    pass
             return
 
         await forward_message(source_channel, message, source_event_chat_id=event.chat_id)
@@ -517,6 +537,16 @@ async def setup_message_handler():
                 if message_text or event.message.media:
                     can_post = await db.can_post_today(source_channel['id'])
                     if not can_post:
+                        # Limit aşıldığında kullanıcıya bildir
+                        if source_channel.get('send_link_back', False):
+                            try:
+                                await client.send_message(
+                                    event.chat_id,
+                                    "⚠️ Günlük post limitiniz doldu. Yarın tekrar deneyin.",
+                                    link_preview=False
+                                )
+                            except Exception:
+                                pass
                         return
 
                     await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
