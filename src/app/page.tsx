@@ -51,6 +51,14 @@ const ChannelsIcon = () => (
   </svg>
 );
 
+const TargetIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <circle cx="12" cy="12" r="6"/>
+    <circle cx="12" cy="12" r="2"/>
+  </svg>
+);
+
 const ChartIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M3 3v18h18"/>
@@ -98,6 +106,15 @@ const EditIcon = () => (
 );
 
 // Types
+interface TargetChannel {
+  id: number;
+  chat_id: string;
+  title: string;
+  username: string;
+  is_active: boolean;
+  created_at: string;
+}
+
 interface SourceChannel {
   id: number;
   source_chat_id: string;
@@ -105,6 +122,9 @@ interface SourceChannel {
   source_username: string;
   target_chat_id: string;
   target_title: string;
+  target_channel_id: number | null;
+  target_channel_title: string;
+  target_channel_chat_id: string;
   append_link: string;
   daily_limit: number;
   remove_links: boolean;
@@ -139,13 +159,14 @@ interface Stats {
   weekly_stats: { date: string; posts: number; success: number }[];
 }
 
-const emptyChannel: Partial<SourceChannel> = {
+const emptySourceChannel: Partial<SourceChannel> = {
   source_chat_id: '',
   source_title: '',
+  target_channel_id: null,
   target_chat_id: '',
   target_title: '',
   append_link: '',
-  daily_limit: 4,
+  daily_limit: 10,
   remove_links: true,
   remove_emojis: false,
   is_active: true,
@@ -154,11 +175,21 @@ const emptyChannel: Partial<SourceChannel> = {
   send_link_back: false,
 };
 
+const emptyTargetChannel: Partial<TargetChannel> = {
+  chat_id: '',
+  title: '',
+  username: '',
+  is_active: true,
+};
+
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState("channels");
+  const [activeTab, setActiveTab] = useState("targets");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [channels, setChannels] = useState<SourceChannel[]>([]);
+
+  // Data states
+  const [targetChannels, setTargetChannels] = useState<TargetChannel[]>([]);
+  const [sourceChannels, setSourceChannels] = useState<SourceChannel[]>([]);
   const [history, setHistory] = useState<PostHistory[]>([]);
   const [stats, setStats] = useState<Stats>({
     today_posts: 0,
@@ -170,21 +201,30 @@ export default function Dashboard() {
     weekly_stats: [],
   });
 
-  const [editingChannel, setEditingChannel] = useState<Partial<SourceChannel> | null>(null);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  // Dialog states
+  const [editingSourceChannel, setEditingSourceChannel] = useState<Partial<SourceChannel> | null>(null);
+  const [isSourceDialogOpen, setIsSourceDialogOpen] = useState(false);
+  const [editingTargetChannel, setEditingTargetChannel] = useState<Partial<TargetChannel> | null>(null);
+  const [isTargetDialogOpen, setIsTargetDialogOpen] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
       setLoading(true);
-      const [channelsRes, statsRes, postsRes] = await Promise.all([
+      const [targetRes, sourceRes, statsRes, postsRes] = await Promise.all([
+        fetch('/api/target-channels'),
         fetch('/api/channels'),
         fetch('/api/stats'),
         fetch('/api/posts?limit=50'),
       ]);
 
-      if (channelsRes.ok) {
-        const channelsData = await channelsRes.json();
-        setChannels(channelsData);
+      if (targetRes.ok) {
+        const targetData = await targetRes.json();
+        setTargetChannels(targetData);
+      }
+
+      if (sourceRes.ok) {
+        const sourceData = await sourceRes.json();
+        setSourceChannels(sourceData);
       }
 
       if (statsRes.ok) {
@@ -209,32 +249,82 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  const handleSaveChannel = async () => {
-    if (!editingChannel) return;
+  // Target Channel handlers
+  const handleSaveTargetChannel = async () => {
+    if (!editingTargetChannel) return;
 
     setSaving(true);
     try {
-      const method = editingChannel.id ? 'PUT' : 'POST';
-      const response = await fetch('/api/channels', {
+      const method = editingTargetChannel.id ? 'PUT' : 'POST';
+      const response = await fetch('/api/target-channels', {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editingChannel),
+        body: JSON.stringify(editingTargetChannel),
       });
 
       if (response.ok) {
         await fetchData();
-        setIsDialogOpen(false);
-        setEditingChannel(null);
+        setIsTargetDialogOpen(false);
+        setEditingTargetChannel(null);
+      } else {
+        const error = await response.json();
+        alert(error.error || 'Bir hata olustu');
       }
     } catch (error) {
-      console.error('Error saving channel:', error);
+      console.error('Error saving target channel:', error);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDeleteChannel = async (id: number) => {
-    if (!confirm('Bu kanali silmek istediginizden emin misiniz?')) return;
+  const handleDeleteTargetChannel = async (id: number) => {
+    if (!confirm('Bu hedef kanali silmek istediginizden emin misiniz?')) return;
+
+    try {
+      const response = await fetch(`/api/target-channels?id=${id}`, { method: 'DELETE' });
+      if (response.ok) {
+        await fetchData();
+      } else {
+        const error = await response.json();
+        alert(error.error || 'Silinemedi');
+      }
+    } catch (error) {
+      console.error('Error deleting target channel:', error);
+    }
+  };
+
+  // Source Channel handlers
+  const handleSaveSourceChannel = async () => {
+    if (!editingSourceChannel) return;
+
+    if (!editingSourceChannel.target_channel_id && !editingSourceChannel.target_chat_id) {
+      alert('Lutfen bir hedef kanal secin!');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const method = editingSourceChannel.id ? 'PUT' : 'POST';
+      const response = await fetch('/api/channels', {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingSourceChannel),
+      });
+
+      if (response.ok) {
+        await fetchData();
+        setIsSourceDialogOpen(false);
+        setEditingSourceChannel(null);
+      }
+    } catch (error) {
+      console.error('Error saving source channel:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteSourceChannel = async (id: number) => {
+    if (!confirm('Bu dinleme kanalini silmek istediginizden emin misiniz?')) return;
 
     try {
       const response = await fetch(`/api/channels?id=${id}`, { method: 'DELETE' });
@@ -242,11 +332,11 @@ export default function Dashboard() {
         await fetchData();
       }
     } catch (error) {
-      console.error('Error deleting channel:', error);
+      console.error('Error deleting source channel:', error);
     }
   };
 
-  const handleToggleChannel = async (channel: SourceChannel) => {
+  const handleToggleSourceChannel = async (channel: SourceChannel) => {
     try {
       const response = await fetch('/api/channels', {
         method: 'PUT',
@@ -292,6 +382,16 @@ export default function Dashboard() {
     if (!stats.last_post_time) return '-';
     const date = new Date(stats.last_post_time);
     return date.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const getTargetChannelName = (channel: SourceChannel) => {
+    if (channel.target_channel_title) {
+      return channel.target_channel_title;
+    }
+    if (channel.target_title) {
+      return channel.target_title;
+    }
+    return channel.target_chat_id || 'Hedef Yok';
   };
 
   return (
@@ -364,9 +464,13 @@ export default function Dashboard() {
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList className="w-full md:w-auto mb-6 bg-zinc-900 border border-zinc-800">
-            <TabsTrigger value="channels" className="flex items-center gap-2 data-[state=active]:bg-zinc-800">
+            <TabsTrigger value="targets" className="flex items-center gap-2 data-[state=active]:bg-zinc-800">
+              <TargetIcon />
+              <span className="hidden sm:inline">Hedef Kanallar</span>
+            </TabsTrigger>
+            <TabsTrigger value="sources" className="flex items-center gap-2 data-[state=active]:bg-zinc-800">
               <ChannelsIcon />
-              <span className="hidden sm:inline">Kanallar</span>
+              <span className="hidden sm:inline">Dinleme Kanallari</span>
             </TabsTrigger>
             <TabsTrigger value="settings" className="flex items-center gap-2 data-[state=active]:bg-zinc-800">
               <SettingsIcon />
@@ -382,32 +486,174 @@ export default function Dashboard() {
             </TabsTrigger>
           </TabsList>
 
-          {/* Channels Tab */}
-          <TabsContent value="channels">
+          {/* Target Channels Tab */}
+          <TabsContent value="targets">
+            <Card className="bg-zinc-900/50 border-zinc-800">
+              <CardHeader className="flex flex-row items-center justify-between">
+                <div>
+                  <CardTitle className="text-zinc-100">Hedef Kanallar</CardTitle>
+                  <CardDescription>Mesajlarin gonderilecegi kanallar</CardDescription>
+                </div>
+                <Dialog open={isTargetDialogOpen} onOpenChange={setIsTargetDialogOpen}>
+                  <DialogTrigger asChild>
+                    <Button onClick={() => setEditingTargetChannel({ ...emptyTargetChannel })} className="bg-emerald-600 hover:bg-emerald-700">
+                      <PlusIcon />
+                      <span className="ml-2">Hedef Ekle</span>
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="bg-zinc-900 border-zinc-800">
+                    <DialogHeader>
+                      <DialogTitle className="text-zinc-100">
+                        {editingTargetChannel?.id ? 'Hedef Kanali Duzenle' : 'Yeni Hedef Kanal Ekle'}
+                      </DialogTitle>
+                      <DialogDescription>
+                        Mesajlarin gonderilecegi kanali ekleyin
+                      </DialogDescription>
+                    </DialogHeader>
+
+                    {editingTargetChannel && (
+                      <div className="grid gap-4 py-4">
+                        <div className="space-y-2">
+                          <Label htmlFor="target_chat_id">Kanal ID</Label>
+                          <Input
+                            id="target_chat_id"
+                            placeholder="-100123456789 veya @kanaliniz"
+                            value={editingTargetChannel.chat_id || ''}
+                            onChange={(e) => setEditingTargetChannel(prev => ({ ...prev, chat_id: e.target.value }))}
+                            className="bg-zinc-800 border-zinc-700"
+                          />
+                          <p className="text-xs text-zinc-500">Kanalin ID&apos;si veya @kullaniciadi</p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="target_title">Kanal Ismi</Label>
+                          <Input
+                            id="target_title"
+                            placeholder="Kanal Adi"
+                            value={editingTargetChannel.title || ''}
+                            onChange={(e) => setEditingTargetChannel(prev => ({ ...prev, title: e.target.value }))}
+                            className="bg-zinc-800 border-zinc-700"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="target_username">Kullanici Adi (Opsiyonel)</Label>
+                          <Input
+                            id="target_username"
+                            placeholder="@kanaliniz"
+                            value={editingTargetChannel.username || ''}
+                            onChange={(e) => setEditingTargetChannel(prev => ({ ...prev, username: e.target.value }))}
+                            className="bg-zinc-800 border-zinc-700"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <DialogFooter>
+                      <DialogClose asChild>
+                        <Button variant="outline" className="border-zinc-700">Iptal</Button>
+                      </DialogClose>
+                      <Button onClick={handleSaveTargetChannel} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700">
+                        {saving ? 'Kaydediliyor...' : 'Kaydet'}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              </CardHeader>
+              <CardContent>
+                {loading ? (
+                  <div className="text-center py-8 text-zinc-500">Yukleniyor...</div>
+                ) : targetChannels.length === 0 ? (
+                  <div className="text-center py-8 text-zinc-500">
+                    <p>Henuz hedef kanal eklenmedi.</p>
+                    <p className="text-xs mt-2">Once hedef kanallarinizi ekleyin, sonra dinleme kanallari olusturun.</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-zinc-800">
+                          <TableHead className="text-zinc-400">Kanal Ismi</TableHead>
+                          <TableHead className="text-zinc-400">Kanal ID</TableHead>
+                          <TableHead className="text-zinc-400">Kullanici Adi</TableHead>
+                          <TableHead className="text-zinc-400 text-right">Islemler</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {targetChannels.map((channel) => (
+                          <TableRow key={channel.id} className="border-zinc-800">
+                            <TableCell className="font-medium text-zinc-200">
+                              {channel.title}
+                            </TableCell>
+                            <TableCell className="font-mono text-zinc-400 text-sm">
+                              {channel.chat_id}
+                            </TableCell>
+                            <TableCell className="text-zinc-400">
+                              {channel.username || '-'}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => {
+                                    setEditingTargetChannel(channel);
+                                    setIsTargetDialogOpen(true);
+                                  }}
+                                  className="text-zinc-400 hover:text-zinc-100"
+                                >
+                                  <EditIcon />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleDeleteTargetChannel(channel.id)}
+                                  className="text-red-400 hover:text-red-300"
+                                >
+                                  <TrashIcon />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Source Channels Tab */}
+          <TabsContent value="sources">
             <Card className="bg-zinc-900/50 border-zinc-800">
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
                   <CardTitle className="text-zinc-100">Dinleme Kanallari</CardTitle>
-                  <CardDescription>Kaynak kanallar ve hedef ayarlari</CardDescription>
+                  <CardDescription>Mesajlarin alinacagi kaynaklar</CardDescription>
                 </div>
-                <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+                <Dialog open={isSourceDialogOpen} onOpenChange={setIsSourceDialogOpen}>
                   <DialogTrigger asChild>
-                    <Button onClick={() => setEditingChannel({ ...emptyChannel })} className="bg-emerald-600 hover:bg-emerald-700">
+                    <Button
+                      onClick={() => setEditingSourceChannel({ ...emptySourceChannel })}
+                      className="bg-emerald-600 hover:bg-emerald-700"
+                      disabled={targetChannels.length === 0}
+                    >
                       <PlusIcon />
-                      <span className="ml-2">Kanal Ekle</span>
+                      <span className="ml-2">Dinleme Ekle</span>
                     </Button>
                   </DialogTrigger>
                   <DialogContent className="max-w-2xl bg-zinc-900 border-zinc-800">
                     <DialogHeader>
                       <DialogTitle className="text-zinc-100">
-                        {editingChannel?.id ? 'Kanali Duzenle' : 'Yeni Kanal Ekle'}
+                        {editingSourceChannel?.id ? 'Dinleme Kanalini Duzenle' : 'Yeni Dinleme Kanali Ekle'}
                       </DialogTitle>
                       <DialogDescription>
                         Dinleme kanali ayarlarini yapilandirin
                       </DialogDescription>
                     </DialogHeader>
 
-                    {editingChannel && (
+                    {editingSourceChannel && (
                       <div className="grid gap-4 py-4 max-h-[60vh] overflow-y-auto">
                         <div className="grid md:grid-cols-2 gap-4">
                           <div className="space-y-2">
@@ -415,48 +661,46 @@ export default function Dashboard() {
                             <Input
                               id="source_chat_id"
                               placeholder="-100123456789"
-                              value={editingChannel.source_chat_id || ''}
-                              onChange={(e) => setEditingChannel(prev => ({ ...prev, source_chat_id: e.target.value }))}
+                              value={editingSourceChannel.source_chat_id || ''}
+                              onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, source_chat_id: e.target.value }))}
                               className="bg-zinc-800 border-zinc-700"
                             />
                             <p className="text-xs text-zinc-500">Dinlenecek kanalin ID&apos;si</p>
                           </div>
 
                           <div className="space-y-2">
-                            <Label htmlFor="source_title">Kaynak Ismi (Opsiyonel)</Label>
+                            <Label htmlFor="source_title">Kaynak Ismi</Label>
                             <Input
                               id="source_title"
                               placeholder="Kaynak Kanal"
-                              value={editingChannel.source_title || ''}
-                              onChange={(e) => setEditingChannel(prev => ({ ...prev, source_title: e.target.value }))}
+                              value={editingSourceChannel.source_title || ''}
+                              onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, source_title: e.target.value }))}
                               className="bg-zinc-800 border-zinc-700"
                             />
                           </div>
                         </div>
 
-                        <div className="grid md:grid-cols-2 gap-4">
-                          <div className="space-y-2">
-                            <Label htmlFor="target_chat_id">Hedef Kanal ID</Label>
-                            <Input
-                              id="target_chat_id"
-                              placeholder="-100987654321 veya @kanaliniz"
-                              value={editingChannel.target_chat_id || ''}
-                              onChange={(e) => setEditingChannel(prev => ({ ...prev, target_chat_id: e.target.value }))}
-                              className="bg-zinc-800 border-zinc-700"
-                            />
-                            <p className="text-xs text-zinc-500">Mesajlarin gonderilecegi kanal</p>
-                          </div>
-
-                          <div className="space-y-2">
-                            <Label htmlFor="target_title">Hedef Ismi (Opsiyonel)</Label>
-                            <Input
-                              id="target_title"
-                              placeholder="Hedef Kanal"
-                              value={editingChannel.target_title || ''}
-                              onChange={(e) => setEditingChannel(prev => ({ ...prev, target_title: e.target.value }))}
-                              className="bg-zinc-800 border-zinc-700"
-                            />
-                          </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="target_channel_id">Hedef Kanal</Label>
+                          <Select
+                            value={editingSourceChannel.target_channel_id?.toString() || ''}
+                            onValueChange={(value) => setEditingSourceChannel(prev => ({
+                              ...prev,
+                              target_channel_id: value ? parseInt(value) : null
+                            }))}
+                          >
+                            <SelectTrigger className="bg-zinc-800 border-zinc-700">
+                              <SelectValue placeholder="Hedef kanal secin..." />
+                            </SelectTrigger>
+                            <SelectContent className="bg-zinc-800 border-zinc-700">
+                              {targetChannels.map((tc) => (
+                                <SelectItem key={tc.id} value={tc.id.toString()}>
+                                  {tc.title} ({tc.chat_id})
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-zinc-500">Mesajlarin gonderilecegi hedef kanal</p>
                         </div>
 
                         <div className="border-t border-zinc-800 pt-4">
@@ -466,8 +710,8 @@ export default function Dashboard() {
                             <div className="space-y-2">
                               <Label htmlFor="listen_type">Dinleme Turu</Label>
                               <Select
-                                value={editingChannel.listen_type || 'direct'}
-                                onValueChange={(value: 'direct' | 'link') => setEditingChannel(prev => ({ ...prev, listen_type: value }))}
+                                value={editingSourceChannel.listen_type || 'direct'}
+                                onValueChange={(value) => setEditingSourceChannel(prev => ({ ...prev, listen_type: value as 'direct' | 'link' }))}
                               >
                                 <SelectTrigger className="bg-zinc-800 border-zinc-700">
                                   <SelectValue />
@@ -478,7 +722,7 @@ export default function Dashboard() {
                                 </SelectContent>
                               </Select>
                               <p className="text-xs text-zinc-500">
-                                {editingChannel.listen_type === 'link'
+                                {editingSourceChannel.listen_type === 'link'
                                   ? 'Sadece telegram mesaj linklerini isler'
                                   : 'Tum mesajlari direkt iletir'}
                               </p>
@@ -490,9 +734,9 @@ export default function Dashboard() {
                                 id="daily_limit"
                                 type="number"
                                 min="1"
-                                max="100"
-                                value={editingChannel.daily_limit || 4}
-                                onChange={(e) => setEditingChannel(prev => ({ ...prev, daily_limit: parseInt(e.target.value) || 4 }))}
+                                max="1000"
+                                value={editingSourceChannel.daily_limit || 10}
+                                onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, daily_limit: parseInt(e.target.value) || 10 }))}
                                 className="bg-zinc-800 border-zinc-700"
                               />
                               <p className="text-xs text-zinc-500">Gunde max post sayisi</p>
@@ -504,8 +748,8 @@ export default function Dashboard() {
                             <Textarea
                               id="trigger_keywords"
                               placeholder="kazanc, bonus, firsat (virgul ile ayirin)"
-                              value={editingChannel.trigger_keywords || ''}
-                              onChange={(e) => setEditingChannel(prev => ({ ...prev, trigger_keywords: e.target.value }))}
+                              value={editingSourceChannel.trigger_keywords || ''}
+                              onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, trigger_keywords: e.target.value }))}
                               className="bg-zinc-800 border-zinc-700"
                             />
                             <p className="text-xs text-zinc-500">
@@ -522,8 +766,8 @@ export default function Dashboard() {
                             <Input
                               id="append_link"
                               placeholder="https://t.me/kanaliniz"
-                              value={editingChannel.append_link || ''}
-                              onChange={(e) => setEditingChannel(prev => ({ ...prev, append_link: e.target.value }))}
+                              value={editingSourceChannel.append_link || ''}
+                              onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, append_link: e.target.value }))}
                               className="bg-zinc-800 border-zinc-700"
                             />
                             <p className="text-xs text-zinc-500">Mesaj sonuna eklenecek link</p>
@@ -536,8 +780,8 @@ export default function Dashboard() {
                                 <p className="text-xs text-zinc-500">URL&apos;leri temizle</p>
                               </div>
                               <Switch
-                                checked={editingChannel.remove_links !== false}
-                                onCheckedChange={(checked) => setEditingChannel(prev => ({ ...prev, remove_links: checked }))}
+                                checked={editingSourceChannel.remove_links !== false}
+                                onCheckedChange={(checked) => setEditingSourceChannel(prev => ({ ...prev, remove_links: checked }))}
                               />
                             </div>
 
@@ -547,19 +791,19 @@ export default function Dashboard() {
                                 <p className="text-xs text-zinc-500">Emojileri sil</p>
                               </div>
                               <Switch
-                                checked={editingChannel.remove_emojis === true}
-                                onCheckedChange={(checked) => setEditingChannel(prev => ({ ...prev, remove_emojis: checked }))}
+                                checked={editingSourceChannel.remove_emojis === true}
+                                onCheckedChange={(checked) => setEditingSourceChannel(prev => ({ ...prev, remove_emojis: checked }))}
                               />
                             </div>
 
                             <div className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg">
                               <div>
                                 <Label>Link Geri Gonder</Label>
-                                <p className="text-xs text-zinc-500">Hedef linkini kaynak&apos;a at</p>
+                                <p className="text-xs text-zinc-500">Hedef linkini kaynaga at</p>
                               </div>
                               <Switch
-                                checked={editingChannel.send_link_back === true}
-                                onCheckedChange={(checked) => setEditingChannel(prev => ({ ...prev, send_link_back: checked }))}
+                                checked={editingSourceChannel.send_link_back === true}
+                                onCheckedChange={(checked) => setEditingSourceChannel(prev => ({ ...prev, send_link_back: checked }))}
                               />
                             </div>
                           </div>
@@ -571,7 +815,7 @@ export default function Dashboard() {
                       <DialogClose asChild>
                         <Button variant="outline" className="border-zinc-700">Iptal</Button>
                       </DialogClose>
-                      <Button onClick={handleSaveChannel} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700">
+                      <Button onClick={handleSaveSourceChannel} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700">
                         {saving ? 'Kaydediliyor...' : 'Kaydet'}
                       </Button>
                     </DialogFooter>
@@ -579,11 +823,22 @@ export default function Dashboard() {
                 </Dialog>
               </CardHeader>
               <CardContent>
-                {loading ? (
-                  <div className="text-center py-8 text-zinc-500">Yukleniyor...</div>
-                ) : channels.length === 0 ? (
+                {targetChannels.length === 0 ? (
                   <div className="text-center py-8 text-zinc-500">
-                    Henuz kanal eklenmedi. &quot;Kanal Ekle&quot; butonuna tiklayin.
+                    <p>Once hedef kanal eklemeniz gerekiyor.</p>
+                    <Button
+                      variant="outline"
+                      className="mt-4 border-zinc-700"
+                      onClick={() => setActiveTab('targets')}
+                    >
+                      Hedef Kanallara Git
+                    </Button>
+                  </div>
+                ) : loading ? (
+                  <div className="text-center py-8 text-zinc-500">Yukleniyor...</div>
+                ) : sourceChannels.length === 0 ? (
+                  <div className="text-center py-8 text-zinc-500">
+                    Henuz dinleme kanali eklenmedi.
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -600,7 +855,7 @@ export default function Dashboard() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {channels.map((channel) => (
+                        {sourceChannels.map((channel) => (
                           <TableRow key={channel.id} className="border-zinc-800">
                             <TableCell>
                               <div>
@@ -615,10 +870,10 @@ export default function Dashboard() {
                             <TableCell>
                               <div>
                                 <div className="font-medium text-zinc-200">
-                                  {channel.target_title || 'Hedef'}
+                                  {getTargetChannelName(channel)}
                                 </div>
                                 <div className="text-xs text-zinc-500 font-mono">
-                                  {channel.target_chat_id}
+                                  {channel.target_channel_chat_id || channel.target_chat_id}
                                 </div>
                               </div>
                             </TableCell>
@@ -637,7 +892,7 @@ export default function Dashboard() {
                             <TableCell>
                               <Switch
                                 checked={channel.is_active}
-                                onCheckedChange={() => handleToggleChannel(channel)}
+                                onCheckedChange={() => handleToggleSourceChannel(channel)}
                               />
                             </TableCell>
                             <TableCell className="text-right">
@@ -646,8 +901,8 @@ export default function Dashboard() {
                                   variant="ghost"
                                   size="sm"
                                   onClick={() => {
-                                    setEditingChannel(channel);
-                                    setIsDialogOpen(true);
+                                    setEditingSourceChannel(channel);
+                                    setIsSourceDialogOpen(true);
                                   }}
                                   className="text-zinc-400 hover:text-zinc-100"
                                 >
@@ -656,7 +911,7 @@ export default function Dashboard() {
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  onClick={() => handleDeleteChannel(channel.id)}
+                                  onClick={() => handleDeleteSourceChannel(channel.id)}
                                   className="text-red-400 hover:text-red-300"
                                 >
                                   <TrashIcon />
@@ -715,7 +970,7 @@ export default function Dashboard() {
                 <CardContent className="space-y-4">
                   <div className="p-4 bg-zinc-800/50 rounded-lg">
                     <div className="text-sm text-zinc-400 mb-1">Versiyon</div>
-                    <div className="text-zinc-200">1.0.0</div>
+                    <div className="text-zinc-200">1.1.0</div>
                   </div>
                   <div className="p-4 bg-zinc-800/50 rounded-lg">
                     <div className="text-sm text-zinc-400 mb-1">Bot</div>
@@ -866,7 +1121,7 @@ export default function Dashboard() {
 
         {/* Footer */}
         <div className="mt-12 text-center text-zinc-600 text-sm">
-          <p>Telegram Forwarder Bot v1.0</p>
+          <p>Telegram Forwarder Bot v1.1</p>
           <p className="mt-1">Heroku + Netlify + Neon.tech</p>
         </div>
       </div>
