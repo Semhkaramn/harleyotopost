@@ -81,6 +81,7 @@ async def init_db():
             "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS trigger_keywords TEXT DEFAULT ''",
             "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS send_link_back BOOLEAN DEFAULT FALSE",
             "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS target_channel_id INTEGER",
+            "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS append_link_text TEXT DEFAULT ''",
         ]
 
         for query in migration_queries:
@@ -222,6 +223,7 @@ async def add_source_channel(
     source_username: str = None,
     target_title: str = None,
     append_link: str = '',
+    append_link_text: str = '',
     daily_limit: int = 10,
     remove_links: bool = True,
     remove_emojis: bool = False,
@@ -236,26 +238,27 @@ async def add_source_channel(
         row = await conn.fetchrow('''
             INSERT INTO source_channels
             (source_chat_id, target_chat_id, source_title, source_username,
-             target_title, append_link, daily_limit, remove_links, remove_emojis,
+             target_title, append_link, append_link_text, daily_limit, remove_links, remove_emojis,
              listen_type, trigger_keywords, send_link_back, target_channel_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (source_chat_id) DO UPDATE SET
                 target_chat_id = $2,
                 source_title = COALESCE($3, source_channels.source_title),
                 source_username = COALESCE($4, source_channels.source_username),
                 target_title = COALESCE($5, source_channels.target_title),
                 append_link = $6,
-                daily_limit = $7,
-                remove_links = $8,
-                remove_emojis = $9,
-                listen_type = $10,
-                trigger_keywords = $11,
-                send_link_back = $12,
-                target_channel_id = $13,
+                append_link_text = $7,
+                daily_limit = $8,
+                remove_links = $9,
+                remove_emojis = $10,
+                listen_type = $11,
+                trigger_keywords = $12,
+                send_link_back = $13,
+                target_channel_id = $14,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id
         ''', source_chat_id, target_chat_id, source_title, source_username,
-            target_title, append_link, daily_limit, remove_links, remove_emojis,
+            target_title, append_link, append_link_text, daily_limit, remove_links, remove_emojis,
             listen_type, trigger_keywords, send_link_back, target_channel_id)
         return row['id']
 
@@ -264,6 +267,7 @@ async def update_source_channel(
     source_chat_id: int,
     target_chat_id: int = None,
     append_link: str = None,
+    append_link_text: str = None,
     daily_limit: int = None,
     remove_links: bool = None,
     remove_emojis: bool = None,
@@ -287,6 +291,10 @@ async def update_source_channel(
         if append_link is not None:
             updates.append(f"append_link = ${idx}")
             values.append(append_link)
+            idx += 1
+        if append_link_text is not None:
+            updates.append(f"append_link_text = ${idx}")
+            values.append(append_link_text)
             idx += 1
         if daily_limit is not None:
             updates.append(f"daily_limit = ${idx}")
