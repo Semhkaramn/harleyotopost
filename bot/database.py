@@ -66,7 +66,6 @@ async def init_db():
                 append_link TEXT DEFAULT '',
                 daily_limit INTEGER DEFAULT 10,
                 remove_links BOOLEAN DEFAULT TRUE,
-                remove_emojis BOOLEAN DEFAULT FALSE,
                 is_active BOOLEAN DEFAULT TRUE,
                 listen_type VARCHAR(20) DEFAULT 'direct',
                 trigger_keywords TEXT DEFAULT '',
@@ -227,7 +226,6 @@ async def add_source_channel(
     append_link_text: str = '',
     daily_limit: int = 10,
     remove_links: bool = True,
-    remove_emojis: bool = False,
     listen_type: str = 'direct',
     trigger_keywords: str = '',
     send_link_back: bool = False,
@@ -239,9 +237,9 @@ async def add_source_channel(
         row = await conn.fetchrow('''
             INSERT INTO source_channels
             (source_chat_id, target_chat_id, source_title, source_username,
-             target_title, append_link, append_link_text, daily_limit, remove_links, remove_emojis,
+             target_title, append_link, append_link_text, daily_limit, remove_links,
              listen_type, trigger_keywords, send_link_back, target_channel_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (source_chat_id) DO UPDATE SET
                 target_chat_id = $2,
                 source_title = COALESCE($3, source_channels.source_title),
@@ -251,15 +249,14 @@ async def add_source_channel(
                 append_link_text = $7,
                 daily_limit = $8,
                 remove_links = $9,
-                remove_emojis = $10,
-                listen_type = $11,
-                trigger_keywords = $12,
-                send_link_back = $13,
-                target_channel_id = $14,
+                listen_type = $10,
+                trigger_keywords = $11,
+                send_link_back = $12,
+                target_channel_id = $13,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id
         ''', source_chat_id, target_chat_id, source_title, source_username,
-            target_title, append_link, append_link_text, daily_limit, remove_links, remove_emojis,
+            target_title, append_link, append_link_text, daily_limit, remove_links,
             listen_type, trigger_keywords, send_link_back, target_channel_id)
         return row['id']
 
@@ -271,7 +268,6 @@ async def update_source_channel(
     append_link_text: str = None,
     daily_limit: int = None,
     remove_links: bool = None,
-    remove_emojis: bool = None,
     is_active: bool = None,
     listen_type: str = None,
     trigger_keywords: str = None,
@@ -304,10 +300,6 @@ async def update_source_channel(
         if remove_links is not None:
             updates.append(f"remove_links = ${idx}")
             values.append(remove_links)
-            idx += 1
-        if remove_emojis is not None:
-            updates.append(f"remove_emojis = ${idx}")
-            values.append(remove_emojis)
             idx += 1
         if is_active is not None:
             updates.append(f"is_active = ${idx}")
