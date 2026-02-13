@@ -1,16 +1,21 @@
 import asyncio
 import re
 import logging
+import signal
+import sys
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
-    MessageEntityTextUrl,
-    MessageEntityUrl,
-    InputMediaPhoto,
-    InputMediaDocument
 )
-from telethon.errors import FloodWaitError, ChatWriteForbiddenError
+from telethon.errors import (
+    FloodWaitError,
+    ChatWriteForbiddenError,
+    SessionPasswordNeededError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedBanError
+)
 import config
 import database as db
 
@@ -20,6 +25,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Global flags
+shutdown_flag = False
+client = None
 
 # URL regex pattern
 URL_PATTERN = re.compile(
@@ -33,12 +42,26 @@ TELEGRAM_LINK_PATTERN = re.compile(
     r'(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?(\d+|[a-zA-Z][a-zA-Z0-9_]*)/(\d+)'
 )
 
-# Initialize client
-client = TelegramClient(
-    config.SESSION_NAME,
-    config.API_ID,
-    config.API_HASH
-)
+
+def create_client():
+    """Create Telegram client with appropriate session type"""
+    # Check if SESSION_STRING is provided (recommended for cloud deployments)
+    if config.SESSION_STRING:
+        logger.info("Using StringSession (cloud mode)")
+        session = StringSession(config.SESSION_STRING)
+    else:
+        # Fallback to file-based session (local development)
+        logger.info(f"Using file-based session: {config.SESSION_NAME}")
+        session = config.SESSION_NAME
+
+    return TelegramClient(
+        session,
+        config.API_ID,
+        config.API_HASH,
+        connection_retries=5,
+        retry_delay=1,
+        auto_reconnect=True
+    )
 
 
 def remove_urls_from_text(text: str) -> str:
@@ -144,6 +167,8 @@ def check_trigger_keywords(text: str, keywords_str: str) -> bool:
 
 async def forward_message(source_channel_config: dict, message, source_event_chat_id=None):
     """Forward a message to target channel with processing"""
+    global client
+
     try:
         target_chat_id = source_channel_config['target_chat_id']
         append_link = source_channel_config['append_link']
@@ -260,6 +285,8 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
 
 async def handle_telegram_link(event, link: str):
     """Handle a telegram message link - fetch and forward"""
+    global client
+
     try:
         chat_id, message_id = await parse_telegram_link(link)
 
@@ -303,109 +330,271 @@ async def handle_telegram_link(event, link: str):
         logger.error(f"Error handling telegram link: {e}")
 
 
-@client.on(events.NewMessage)
-async def message_handler(event):
-    """Handle new messages in monitored channels/groups"""
-    try:
-        # Check if bot is enabled
-        if not await db.is_bot_enabled():
-            return
+async def setup_message_handler():
+    """Setup the message handler for the client"""
+    global client
 
-        # Check if this is a source channel
-        source_channel = await db.get_source_channel(event.chat_id)
+    @client.on(events.NewMessage)
+    async def message_handler(event):
+        """Handle new messages in monitored channels/groups"""
+        try:
+            # Check if bot is enabled
+            if not await db.is_bot_enabled():
+                return
 
-        if not source_channel:
-            return
+            # Check if this is a source channel
+            source_channel = await db.get_source_channel(event.chat_id)
 
-        message_text = event.message.text or event.message.caption or ''
-        listen_type = source_channel.get('listen_type', 'direct')
+            if not source_channel:
+                return
 
-        # Handle based on listen type
-        if listen_type == 'link':
-            # Only process telegram links in the message
-            links = TELEGRAM_LINK_PATTERN.findall(message_text)
+            message_text = event.message.text or event.message.caption or ''
+            listen_type = source_channel.get('listen_type', 'direct')
 
-            if links:
-                # Reconstruct full links and process each
-                for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
-                    full_link = match.group(0)
-                    await handle_telegram_link(event, full_link)
-            # If no links and listen_type is 'link', ignore the message
+            # Handle based on listen type
+            if listen_type == 'link':
+                # Only process telegram links in the message
+                links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
-        else:  # listen_type == 'direct'
-            # Check for telegram links in the message first
-            links = TELEGRAM_LINK_PATTERN.findall(message_text)
+                if links:
+                    # Reconstruct full links and process each
+                    for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
+                        full_link = match.group(0)
+                        await handle_telegram_link(event, full_link)
+                # If no links and listen_type is 'link', ignore the message
 
-            if links:
-                # If there are links, process them
-                for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
-                    full_link = match.group(0)
-                    await handle_telegram_link(event, full_link)
-            else:
-                # No links - forward the message directly if it has content
-                if message_text or event.message.media:
-                    # Check daily limit
-                    can_post = await db.can_post_today(source_channel['id'])
-                    if not can_post:
-                        logger.info(f"Daily limit reached for channel {source_channel['id']}")
-                        return
+            else:  # listen_type == 'direct'
+                # Check for telegram links in the message first
+                links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
-                    await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
+                if links:
+                    # If there are links, process them
+                    for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
+                        full_link = match.group(0)
+                        await handle_telegram_link(event, full_link)
+                else:
+                    # No links - forward the message directly if it has content
+                    if message_text or event.message.media:
+                        # Check daily limit
+                        can_post = await db.can_post_today(source_channel['id'])
+                        if not can_post:
+                            logger.info(f"Daily limit reached for channel {source_channel['id']}")
+                            return
 
-    except Exception as e:
-        logger.error(f"Error in message handler: {e}")
+                        await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
+
+        except Exception as e:
+            logger.error(f"Error in message handler: {e}")
 
 
 async def update_bot_status(status: str):
     """Update bot status in database"""
-    await db.set_setting('bot_status', status)
-    await db.set_setting('last_heartbeat', str(asyncio.get_event_loop().time()))
+    try:
+        await db.set_setting('bot_status', status)
+    except Exception as e:
+        logger.error(f"Error updating bot status: {e}")
 
 
 async def heartbeat():
     """Periodic heartbeat to update bot status"""
-    while True:
+    global shutdown_flag
+
+    while not shutdown_flag:
         try:
             await update_bot_status('online')
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
-        await asyncio.sleep(30)
+
+        await asyncio.sleep(config.HEARTBEAT_INTERVAL)
+
+
+async def graceful_shutdown(sig=None):
+    """Handle graceful shutdown"""
+    global shutdown_flag, client
+
+    if sig:
+        logger.info(f"Received signal {sig.name}, shutting down...")
+    else:
+        logger.info("Shutting down...")
+
+    shutdown_flag = True
+
+    # Update status to offline
+    try:
+        await update_bot_status('offline')
+    except Exception:
+        pass
+
+    # Disconnect client
+    if client and client.is_connected():
+        try:
+            await client.disconnect()
+            logger.info("Telegram client disconnected")
+        except Exception as e:
+            logger.error(f"Error disconnecting client: {e}")
+
+    # Close database connection
+    try:
+        await db.close_db()
+        logger.info("Database connection closed")
+    except Exception as e:
+        logger.error(f"Error closing database: {e}")
+
+
+def setup_signal_handlers(loop):
+    """Setup signal handlers for graceful shutdown"""
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                sig,
+                lambda s=sig: asyncio.create_task(graceful_shutdown(s))
+            )
+        except NotImplementedError:
+            # Windows doesn't support add_signal_handler
+            signal.signal(sig, lambda s, f: asyncio.create_task(graceful_shutdown()))
+
+
+async def start_client():
+    """Start the Telegram client with proper authentication"""
+    global client
+
+    # Using StringSession - client should already be authenticated
+    if config.SESSION_STRING:
+        logger.info("Connecting with StringSession...")
+        await client.connect()
+
+        if not await client.is_user_authorized():
+            logger.error("Session is not authorized! Please generate a new session string.")
+            logger.error("Run: python generate_session.py")
+            raise AuthKeyUnregisteredError("Session expired or invalid")
+
+        logger.info("Successfully connected with StringSession")
+    else:
+        # File-based session - may need interactive login (local development only)
+        logger.info("Connecting with file-based session...")
+
+        if not config.PHONE_NUMBER:
+            logger.error("PHONE_NUMBER is required for file-based session!")
+            logger.error("Set PHONE_NUMBER in .env or use SESSION_STRING instead")
+            raise ValueError("Missing PHONE_NUMBER configuration")
+
+        try:
+            await client.start(phone=config.PHONE_NUMBER)
+            logger.info("Successfully connected with file-based session")
+        except SessionPasswordNeededError:
+            logger.error("Two-factor authentication is enabled!")
+            logger.error("Please use generate_session.py to create a session string")
+            raise
+
+    return client
 
 
 async def main():
     """Main function"""
+    global client, shutdown_flag
+
+    logger.info("=" * 50)
     logger.info("Starting Telegram Forwarder Bot...")
+    logger.info("=" * 50)
+
+    # Validate configuration
+    if not config.API_ID or not config.API_HASH:
+        logger.error("API_ID and API_HASH are required!")
+        logger.error("Get them from https://my.telegram.org")
+        sys.exit(1)
+
+    if not config.DATABASE_URL:
+        logger.error("DATABASE_URL is required!")
+        sys.exit(1)
+
+    if not config.SESSION_STRING and not config.PHONE_NUMBER:
+        logger.error("Either SESSION_STRING or PHONE_NUMBER is required!")
+        logger.error("For cloud deployment: Use SESSION_STRING")
+        logger.error("For local development: Use PHONE_NUMBER")
+        sys.exit(1)
 
     # Initialize database
-    await db.init_db()
-    logger.info("Database initialized")
+    try:
+        await db.init_db()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        sys.exit(1)
 
-    # Start the client
-    await client.start(phone=config.PHONE_NUMBER)
-    logger.info("Telegram client started")
+    # Create and start client
+    client = create_client()
+
+    try:
+        await start_client()
+    except (AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
+        logger.error(f"Authentication failed: {e}")
+        logger.error("Please generate a new session string with generate_session.py")
+        await db.close_db()
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Failed to start client: {e}")
+        await db.close_db()
+        sys.exit(1)
+
+    # Get user info
+    try:
+        me = await client.get_me()
+        logger.info(f"Logged in as: {me.first_name} (@{me.username or 'no username'})")
+    except Exception as e:
+        logger.warning(f"Could not get user info: {e}")
+
+    # Setup message handler
+    await setup_message_handler()
+    logger.info("Message handler registered")
 
     # Update status
     await update_bot_status('online')
 
     # Start heartbeat
-    asyncio.create_task(heartbeat())
+    heartbeat_task = asyncio.create_task(heartbeat())
 
     # Get monitored channels
-    channels = await db.get_active_source_channels()
-    logger.info(f"Monitoring {len(channels)} channels")
+    try:
+        channels = await db.get_active_source_channels()
+        logger.info(f"Monitoring {len(channels)} channels")
 
-    for channel in channels:
-        logger.info(f"  - {channel['source_title'] or channel['source_chat_id']}")
+        for channel in channels:
+            logger.info(f"  - {channel['source_title'] or channel['source_chat_id']}")
+    except Exception as e:
+        logger.warning(f"Could not get channel list: {e}")
 
-    # Run until disconnected
     logger.info("Bot is running...")
-    await client.run_until_disconnected()
+    logger.info("=" * 50)
+
+    # Run until disconnected or shutdown
+    try:
+        await client.run_until_disconnected()
+    except Exception as e:
+        if not shutdown_flag:
+            logger.error(f"Client disconnected unexpectedly: {e}")
+
+    # Cleanup
+    heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
 
 
 if __name__ == '__main__':
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Setup signal handlers
+    setup_signal_handlers(loop)
+
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
+        loop.run_until_complete(graceful_shutdown())
     except Exception as e:
         logger.error(f"Bot crashed: {e}")
+        loop.run_until_complete(graceful_shutdown())
+    finally:
+        loop.close()
