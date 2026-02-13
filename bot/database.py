@@ -36,10 +36,38 @@ async def init_db():
                 remove_links BOOLEAN DEFAULT TRUE,
                 remove_emojis BOOLEAN DEFAULT FALSE,
                 is_active BOOLEAN DEFAULT TRUE,
+                listen_type VARCHAR(20) DEFAULT 'direct',
+                trigger_keywords TEXT DEFAULT '',
+                send_link_back BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Add new columns if they don't exist (for existing databases)
+        try:
+            await conn.execute('''
+                ALTER TABLE source_channels
+                ADD COLUMN IF NOT EXISTS listen_type VARCHAR(20) DEFAULT 'direct'
+            ''')
+        except Exception:
+            pass
+
+        try:
+            await conn.execute('''
+                ALTER TABLE source_channels
+                ADD COLUMN IF NOT EXISTS trigger_keywords TEXT DEFAULT ''
+            ''')
+        except Exception:
+            pass
+
+        try:
+            await conn.execute('''
+                ALTER TABLE source_channels
+                ADD COLUMN IF NOT EXISTS send_link_back BOOLEAN DEFAULT FALSE
+            ''')
+        except Exception:
+            pass
 
         # Posts history
         await conn.execute('''
@@ -135,15 +163,19 @@ async def add_source_channel(
     append_link: str = '',
     daily_limit: int = 4,
     remove_links: bool = True,
-    remove_emojis: bool = False
+    remove_emojis: bool = False,
+    listen_type: str = 'direct',
+    trigger_keywords: str = '',
+    send_link_back: bool = False
 ) -> int:
     """Add or update a source channel configuration"""
     async with pool.acquire() as conn:
         row = await conn.fetchrow('''
             INSERT INTO source_channels
             (source_chat_id, target_chat_id, source_title, source_username,
-             target_title, append_link, daily_limit, remove_links, remove_emojis)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             target_title, append_link, daily_limit, remove_links, remove_emojis,
+             listen_type, trigger_keywords, send_link_back)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (source_chat_id) DO UPDATE SET
                 target_chat_id = $2,
                 source_title = COALESCE($3, source_channels.source_title),
@@ -153,10 +185,14 @@ async def add_source_channel(
                 daily_limit = $7,
                 remove_links = $8,
                 remove_emojis = $9,
+                listen_type = $10,
+                trigger_keywords = $11,
+                send_link_back = $12,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id
         ''', source_chat_id, target_chat_id, source_title, source_username,
-            target_title, append_link, daily_limit, remove_links, remove_emojis)
+            target_title, append_link, daily_limit, remove_links, remove_emojis,
+            listen_type, trigger_keywords, send_link_back)
         return row['id']
 
 
@@ -167,7 +203,10 @@ async def update_source_channel(
     daily_limit: int = None,
     remove_links: bool = None,
     remove_emojis: bool = None,
-    is_active: bool = None
+    is_active: bool = None,
+    listen_type: str = None,
+    trigger_keywords: str = None,
+    send_link_back: bool = None
 ):
     """Update source channel settings"""
     async with pool.acquire() as conn:
@@ -198,6 +237,18 @@ async def update_source_channel(
         if is_active is not None:
             updates.append(f"is_active = ${idx}")
             values.append(is_active)
+            idx += 1
+        if listen_type is not None:
+            updates.append(f"listen_type = ${idx}")
+            values.append(listen_type)
+            idx += 1
+        if trigger_keywords is not None:
+            updates.append(f"trigger_keywords = ${idx}")
+            values.append(trigger_keywords)
+            idx += 1
+        if send_link_back is not None:
+            updates.append(f"send_link_back = ${idx}")
+            values.append(send_link_back)
             idx += 1
 
         if updates:
