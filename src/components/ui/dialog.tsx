@@ -88,4 +88,19 @@ const DialogFooter = ({ children, className }: { children: React.ReactNode; clas
   <div className={cn("flex justify-end gap-3 mt-6", className)}>{children}</div>
 );
 
-export { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter };
+const DialogClose = ({ children, asChild }: { children: React.ReactNode; asChild?: boolean }) => {
+  const context = React.useContext(DialogContext);
+  if (!context) throw new Error("DialogClose must be used within Dialog");
+
+  if (asChild && React.isValidElement(children)) {
+    return React.cloneElement(children as React.ReactElement<{ onClick?: () => void }>, {
+      onClick: () => context.onOpenChange(false),
+    });
+  }
+
+  return (
+    <button onClick={() => context.onOpenChange(false)}>{children}</button>
+  );
+};
+
+export { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose };
