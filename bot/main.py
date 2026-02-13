@@ -118,16 +118,48 @@ async def parse_telegram_link(link: str) -> tuple:
     return chat_id, message_id
 
 
-async def forward_message(source_channel_config: dict, message):
+def check_trigger_keywords(text: str, keywords_str: str) -> bool:
+    """Check if the message contains any trigger keywords"""
+    if not keywords_str or not keywords_str.strip():
+        # No keywords set, allow all messages
+        return True
+
+    if not text:
+        return False
+
+    text_lower = text.lower()
+    # Keywords are comma-separated
+    keywords = [kw.strip().lower() for kw in keywords_str.split(',') if kw.strip()]
+
+    if not keywords:
+        return True
+
+    # Check if any keyword exists in the text
+    for keyword in keywords:
+        if keyword in text_lower:
+            return True
+
+    return False
+
+
+async def forward_message(source_channel_config: dict, message, source_event_chat_id=None):
     """Forward a message to target channel with processing"""
     try:
         target_chat_id = source_channel_config['target_chat_id']
         append_link = source_channel_config['append_link']
         remove_links = source_channel_config['remove_links']
         remove_emojis_flag = source_channel_config['remove_emojis']
+        trigger_keywords = source_channel_config.get('trigger_keywords', '')
+        send_link_back = source_channel_config.get('send_link_back', False)
 
         # Clean the message text
         original_text = message.text or message.caption or ''
+
+        # Check trigger keywords
+        if not check_trigger_keywords(original_text, trigger_keywords):
+            logger.info(f"Message {message.id} skipped - no matching trigger keywords")
+            return False
+
         cleaned_text = clean_message_text(original_text, remove_links, remove_emojis_flag)
         final_text = append_link_to_text(cleaned_text, append_link)
 
@@ -166,6 +198,24 @@ async def forward_message(source_channel_config: dict, message):
             source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
         else:
             source_link = f"t.me/{source_chat_id}/{message.id}"
+
+        # Create target message link
+        target_link = None
+        if str(target_chat_id).startswith('-100'):
+            target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
+        else:
+            target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
+
+        # Send link back to source channel if enabled
+        if send_link_back and source_event_chat_id and target_link:
+            try:
+                await client.send_message(
+                    source_event_chat_id,
+                    target_link
+                )
+                logger.info(f"Sent target link back to {source_event_chat_id}")
+            except Exception as e:
+                logger.warning(f"Could not send link back: {e}")
 
         # Log to database
         await db.add_post(
@@ -246,8 +296,8 @@ async def handle_telegram_link(event, link: str):
             logger.info(f"Daily limit reached for channel {source_channel['id']}. Remaining: {remaining}")
             return
 
-        # Forward the message
-        await forward_message(source_channel, message)
+        # Forward the message (pass source event chat_id for link back feature)
+        await forward_message(source_channel, message, source_event_chat_id=event.chat_id)
 
     except Exception as e:
         logger.error(f"Error handling telegram link: {e}")
@@ -268,25 +318,39 @@ async def message_handler(event):
             return
 
         message_text = event.message.text or event.message.caption or ''
+        listen_type = source_channel.get('listen_type', 'direct')
 
-        # Check for telegram links in the message
-        links = TELEGRAM_LINK_PATTERN.findall(message_text)
+        # Handle based on listen type
+        if listen_type == 'link':
+            # Only process telegram links in the message
+            links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
-        if links:
-            # Reconstruct full links and process each
-            for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
-                full_link = match.group(0)
-                await handle_telegram_link(event, full_link)
-        else:
-            # No links - forward the message directly if it has content
-            if message_text or event.message.media:
-                # Check daily limit
-                can_post = await db.can_post_today(source_channel['id'])
-                if not can_post:
-                    logger.info(f"Daily limit reached for channel {source_channel['id']}")
-                    return
+            if links:
+                # Reconstruct full links and process each
+                for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
+                    full_link = match.group(0)
+                    await handle_telegram_link(event, full_link)
+            # If no links and listen_type is 'link', ignore the message
 
-                await forward_message(source_channel, event.message)
+        else:  # listen_type == 'direct'
+            # Check for telegram links in the message first
+            links = TELEGRAM_LINK_PATTERN.findall(message_text)
+
+            if links:
+                # If there are links, process them
+                for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
+                    full_link = match.group(0)
+                    await handle_telegram_link(event, full_link)
+            else:
+                # No links - forward the message directly if it has content
+                if message_text or event.message.media:
+                    # Check daily limit
+                    can_post = await db.can_post_today(source_channel['id'])
+                    if not can_post:
+                        logger.info(f"Daily limit reached for channel {source_channel['id']}")
+                        return
+
+                    await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
 
     except Exception as e:
         logger.error(f"Error in message handler: {e}")
