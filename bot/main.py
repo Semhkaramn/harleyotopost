@@ -422,7 +422,7 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
                 remaining_posts = await db.get_remaining_posts_today(source_channel_config['id'])
 
                 # Geri bildirim mesajı oluştur (link_preview kapalı)
-                feedback_message = f"✅ Post gönderildi!\n\n📤 Post Bağlantısı: {target_link}\n📊 Kalan Kalan Post Hakkınız: {remaining_posts}"
+                feedback_message = f"✅ Post gönderildi!\n {target_link}\n📊 Kalan Post Hakkınız: {remaining_posts}"
 
                 await client.send_message(
                     source_event_chat_id,
