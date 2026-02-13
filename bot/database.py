@@ -414,13 +414,14 @@ async def add_post(
 
 
 async def get_today_post_count(source_channel_id: int) -> int:
-    """Get number of successful posts made today for a source channel"""
+    """Get number of successful posts made today for a source channel (TR timezone)"""
     _check_pool()
     async with pool.acquire() as conn:
+        # TR saat dilimine göre bugünün tarihini hesapla (UTC+3)
         row = await conn.fetchrow('''
             SELECT COUNT(*) as count FROM posts
             WHERE source_channel_id = $1
-            AND DATE(created_at) = CURRENT_DATE
+            AND DATE(created_at AT TIME ZONE 'Europe/Istanbul') = DATE(NOW() AT TIME ZONE 'Europe/Istanbul')
             AND status = 'success'
         ''', source_channel_id)
         return row['count'] if row else 0
@@ -505,10 +506,13 @@ async def get_remaining_posts_today(source_channel_id: int) -> int:
 # ============== STATS ==============
 
 async def update_daily_stats(source_channel_id: int, success: bool):
-    """Update daily statistics"""
+    """Update daily statistics (TR timezone)"""
     _check_pool()
     async with pool.acquire() as conn:
-        today = date.today()
+        # TR saat dilimine göre bugünün tarihini al
+        from datetime import timezone, timedelta
+        tr_tz = timezone(timedelta(hours=3))
+        today = datetime.now(tr_tz).date()
 
         if success:
             await conn.execute('''
@@ -529,16 +533,16 @@ async def update_daily_stats(source_channel_id: int, success: bool):
 
 
 async def get_stats_summary() -> Dict[str, Any]:
-    """Get overall stats summary"""
+    """Get overall stats summary (TR timezone)"""
     _check_pool()
     async with pool.acquire() as conn:
-        # Today's totals
+        # Today's totals (TR timezone)
         today_row = await conn.fetchrow('''
             SELECT
                 COALESCE(SUM(post_count), 0) as today_posts,
                 COALESCE(SUM(success_count), 0) as today_success,
                 COALESCE(SUM(failed_count), 0) as today_failed
-            FROM daily_stats WHERE date = CURRENT_DATE
+            FROM daily_stats WHERE date = DATE(NOW() AT TIME ZONE 'Europe/Istanbul')
         ''')
 
         # Total posts
@@ -546,11 +550,11 @@ async def get_stats_summary() -> Dict[str, Any]:
             SELECT COUNT(*) as total FROM posts WHERE status = 'success'
         ''')
 
-        # Weekly stats
+        # Weekly stats (TR timezone)
         weekly_rows = await conn.fetch('''
             SELECT date, SUM(post_count) as posts, SUM(success_count) as success
             FROM daily_stats
-            WHERE date >= CURRENT_DATE - INTERVAL '7 days'
+            WHERE date >= DATE(NOW() AT TIME ZONE 'Europe/Istanbul') - INTERVAL '7 days'
             GROUP BY date ORDER BY date
         ''')
 
