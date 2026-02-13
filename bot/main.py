@@ -11,15 +11,6 @@ from telethon.tl.types import (
     MessageEntityTextUrl,
     MessageEntityUrl,
     MessageEntityMention,
-    MessageEntityCustomEmoji,
-    MessageEntityBold,
-    MessageEntityItalic,
-    MessageEntityCode,
-    MessageEntityPre,
-    MessageEntityStrike,
-    MessageEntityUnderline,
-    MessageEntitySpoiler,
-    MessageEntityBlockquote,
 )
 from telethon.errors import (
     FloodWaitError,
@@ -40,9 +31,8 @@ logger = logging.getLogger(__name__)
 # Global flags
 shutdown_flag = False
 client = None
-is_premium_account = False  # Premium hesap kontrolü
 
-# URL regex pattern
+# URL regex pattern (entity olmayan URL'leri bulmak için)
 URL_PATTERN = re.compile(
     r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     r'|(?:t\.me/[a-zA-Z0-9_/]+)'
@@ -75,299 +65,61 @@ def create_client():
     )
 
 
-def utf16_len(text: str) -> int:
-    """Get UTF-16 length of text (Telegram uses UTF-16 for entity offsets)"""
-    return len(text.encode('utf-16-le')) // 2
-
-
-def utf16_substring(text: str, start: int, end: int) -> str:
-    """Extract substring using UTF-16 offsets"""
-    encoded = text.encode('utf-16-le')
-    # Each UTF-16 unit is 2 bytes
-    start_byte = start * 2
-    end_byte = end * 2
-    if start_byte > len(encoded):
-        return ""
-    if end_byte > len(encoded):
-        end_byte = len(encoded)
-    return encoded[start_byte:end_byte].decode('utf-16-le', errors='ignore')
-
-
-def process_message_for_forwarding(text: str, entities: list, remove_links: bool) -> tuple:
+def remove_links_from_text(text: str, entities: list) -> str:
     """
-    Process message for forwarding.
-
-    If remove_links=False: Return original text and entities unchanged
-    If remove_links=True: Remove hyperlinked text (including anchor text), URLs, mentions and adjust entities
-
-    Returns: (processed_text, processed_entities)
+    Metinden linkleri kaldır.
+    Entity'lerdeki TextUrl, Url, Mention'ların kapladığı metinleri sil.
+    Ayrıca regex ile bulunan URL'leri de sil.
     """
     if not text:
-        return text, entities or []
+        return text
 
-    if not remove_links:
-        # Link kaldırma kapalı - orijinal entity'leri aynen kullan
-        return text, entities or []
-
-    # Link kaldırma açık - işlem yap
     if not entities:
-        # Entity yok, sadece URL pattern ile temizle
+        # Entity yok, sadece regex ile URL'leri temizle
         cleaned = URL_PATTERN.sub('', text)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         cleaned = re.sub(r' {2,}', ' ', cleaned)
-        return cleaned.strip(), []
+        return cleaned.strip()
 
-    # 1. Adım: Kaldırılacak aralıkları belirle (UTF-16 offset olarak)
-    removal_ranges = []  # (start, end) - kaldırılacak karakter aralıkları
+    # Link entity'lerinin kapladığı aralıkları bul (byte pozisyonları)
+    # Telegram UTF-16 kullanıyor
+    removal_ranges = []
 
-    for entity in entities:
-        # Text URL - tıklanabilir linkler (anchor text'i de dahil silmeliyiz)
-        if isinstance(entity, MessageEntityTextUrl):
-            removal_ranges.append((entity.offset, entity.offset + entity.length))
-        # Düz URL'ler
-        elif isinstance(entity, MessageEntityUrl):
-            removal_ranges.append((entity.offset, entity.offset + entity.length))
-        # Mention'lar (@username)
-        elif isinstance(entity, MessageEntityMention):
-            removal_ranges.append((entity.offset, entity.offset + entity.length))
-
-    # Plain URL'leri de bul (entity olmayan)
-    for match in URL_PATTERN.finditer(text):
-        start_utf16 = utf16_len(text[:match.start()])
-        end_utf16 = start_utf16 + utf16_len(match.group())
-
-        # Zaten eklenmiş mi kontrol et
-        already_covered = False
-        for r_start, r_end in removal_ranges:
-            if r_start <= start_utf16 and r_end >= end_utf16:
-                already_covered = True
-                break
-
-        if not already_covered:
-            removal_ranges.append((start_utf16, end_utf16))
-
-    # Kaldırılacak bir şey yoksa orijinal entity'leri döndür
-    if not removal_ranges:
-        cleaned = re.sub(r'\n{3,}', '\n\n', text)
-        cleaned = re.sub(r' {2,}', ' ', cleaned)
-        return cleaned.strip(), list(entities)
-
-    # 2. Adım: Aralıkları sırala ve birleştir (overlapping aralıkları birleştir)
-    removal_ranges.sort(key=lambda x: x[0])
-    merged_ranges = []
-    for start, end in removal_ranges:
-        if merged_ranges and start <= merged_ranges[-1][1]:
-            # Overlap var, birleştir
-            merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
-        else:
-            merged_ranges.append((start, end))
-
-    # 3. Adım: Tutulacak entity'leri belirle (link olmayanlar)
-    keep_entities = []
     for entity in entities:
         if isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
-            continue  # Bu entity'ler kaldırılacak
-        # Diğer entity'ler tutulacak: Custom Emoji, Bold, Italic, Code, Pre, Strike, Underline, Spoiler, Blockquote
-        keep_entities.append(entity)
+            # UTF-16 offset'leri byte pozisyonuna çevir
+            removal_ranges.append((entity.offset, entity.offset + entity.length))
 
-    # 4. Adım: Yeni text oluştur - kaldırılan aralıklar hariç
-    text_utf16_len = utf16_len(text)
-    new_text_parts = []
-    last_end = 0
+    # Aralıkları sırala (sondan başa doğru silmek için ters sırala)
+    removal_ranges.sort(key=lambda x: x[0], reverse=True)
 
-    for r_start, r_end in merged_ranges:
-        if last_end < r_start:
-            part = utf16_substring(text, last_end, r_start)
-            new_text_parts.append(part)
-        last_end = r_end
+    # Metni UTF-16 olarak encode et
+    text_utf16 = text.encode('utf-16-le')
 
-    # Son kısmı ekle
-    if last_end < text_utf16_len:
-        part = utf16_substring(text, last_end, text_utf16_len)
-        new_text_parts.append(part)
+    # Her aralığı sil (sondan başa)
+    for start, end in removal_ranges:
+        start_byte = start * 2
+        end_byte = end * 2
+        if start_byte < len(text_utf16) and end_byte <= len(text_utf16):
+            text_utf16 = text_utf16[:start_byte] + text_utf16[end_byte:]
 
-    new_text = ''.join(new_text_parts)
+    # Geri decode et
+    new_text = text_utf16.decode('utf-16-le', errors='ignore')
 
-    # 5. Adım: Entity offset'lerini yeniden hesapla
-    # Her konum için, o konumdan önce kaç karakter silindiğini hesapla
-    def calculate_shift(position: int) -> int:
-        """Belirli bir pozisyondan önce silinen karakter sayısını hesapla"""
-        shift = 0
-        for r_start, r_end in merged_ranges:
-            if r_end <= position:
-                # Bu aralık tamamen pozisyondan önce
-                shift += (r_end - r_start)
-            elif r_start < position:
-                # Pozisyon bu aralığın içinde
-                shift += (position - r_start)
-        return shift
+    # Regex ile kalan URL'leri de temizle
+    new_text = URL_PATTERN.sub('', new_text)
 
-    adjusted_entities = []
-
-    for entity in keep_entities:
-        orig_start = entity.offset
-        orig_end = orig_start + entity.length
-
-        # Entity'nin kaldırılan bir aralıkla çakışıp çakışmadığını kontrol et
-        entity_valid = True
-        for r_start, r_end in merged_ranges:
-            # Entity tamamen kaldırılan aralık içinde mi?
-            if r_start <= orig_start and orig_end <= r_end:
-                entity_valid = False
-                break
-            # Entity kaldırılan aralıkla kısmen çakışıyor mu?
-            if (r_start < orig_end and r_end > orig_start):
-                # Kısmi çakışma - entity'yi atla (karmaşık durum)
-                entity_valid = False
-                break
-
-        if not entity_valid:
-            continue
-
-        # Yeni offset hesapla
-        new_start = orig_start - calculate_shift(orig_start)
-        new_end = orig_end - calculate_shift(orig_end)
-        new_length = new_end - new_start
-
-        # Geçerlilik kontrolü
-        new_text_len = utf16_len(new_text)
-        if new_start < 0 or new_length <= 0 or new_start >= new_text_len:
-            continue
-
-        # Length'i sınırla
-        if new_start + new_length > new_text_len:
-            new_length = new_text_len - new_start
-            if new_length <= 0:
-                continue
-
-        # Entity'yi yeniden oluştur
-        try:
-            if isinstance(entity, MessageEntityCustomEmoji):
-                adjusted_entities.append(MessageEntityCustomEmoji(
-                    offset=new_start,
-                    length=new_length,
-                    document_id=entity.document_id
-                ))
-            elif isinstance(entity, MessageEntityBold):
-                adjusted_entities.append(MessageEntityBold(
-                    offset=new_start,
-                    length=new_length
-                ))
-            elif isinstance(entity, MessageEntityItalic):
-                adjusted_entities.append(MessageEntityItalic(
-                    offset=new_start,
-                    length=new_length
-                ))
-            elif isinstance(entity, MessageEntityCode):
-                adjusted_entities.append(MessageEntityCode(
-                    offset=new_start,
-                    length=new_length
-                ))
-            elif isinstance(entity, MessageEntityPre):
-                adjusted_entities.append(MessageEntityPre(
-                    offset=new_start,
-                    length=new_length,
-                    language=getattr(entity, 'language', '')
-                ))
-            elif isinstance(entity, MessageEntityStrike):
-                adjusted_entities.append(MessageEntityStrike(
-                    offset=new_start,
-                    length=new_length
-                ))
-            elif isinstance(entity, MessageEntityUnderline):
-                adjusted_entities.append(MessageEntityUnderline(
-                    offset=new_start,
-                    length=new_length
-                ))
-            elif isinstance(entity, MessageEntitySpoiler):
-                adjusted_entities.append(MessageEntitySpoiler(
-                    offset=new_start,
-                    length=new_length
-                ))
-            elif isinstance(entity, MessageEntityBlockquote):
-                adjusted_entities.append(MessageEntityBlockquote(
-                    offset=new_start,
-                    length=new_length
-                ))
-        except Exception as e:
-            logger.warning(f"Could not adjust entity {type(entity)}: {e}")
-            continue
-
-    # 6. Adım: Temizlik
+    # Temizlik
     new_text = re.sub(r'\n{3,}', '\n\n', new_text)
     new_text = re.sub(r' {2,}', ' ', new_text)
-    new_text = new_text.strip()
 
-    # Final entity offset kontrolü - strip sonrası
-    # Strip baştan kaç karakter kaldırdıysa offset'leri güncelle
-    original_new_text = ''.join(new_text_parts)
-    stripped_start = len(original_new_text) - len(original_new_text.lstrip())
-
-    if stripped_start > 0:
-        final_entities = []
-        for entity in adjusted_entities:
-            new_offset = entity.offset - stripped_start
-            if new_offset >= 0 and new_offset < utf16_len(new_text):
-                try:
-                    if isinstance(entity, MessageEntityCustomEmoji):
-                        final_entities.append(MessageEntityCustomEmoji(
-                            offset=new_offset,
-                            length=entity.length,
-                            document_id=entity.document_id
-                        ))
-                    elif isinstance(entity, MessageEntityBold):
-                        final_entities.append(MessageEntityBold(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                    elif isinstance(entity, MessageEntityItalic):
-                        final_entities.append(MessageEntityItalic(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                    elif isinstance(entity, MessageEntityCode):
-                        final_entities.append(MessageEntityCode(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                    elif isinstance(entity, MessageEntityPre):
-                        final_entities.append(MessageEntityPre(
-                            offset=new_offset,
-                            length=entity.length,
-                            language=getattr(entity, 'language', '')
-                        ))
-                    elif isinstance(entity, MessageEntityStrike):
-                        final_entities.append(MessageEntityStrike(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                    elif isinstance(entity, MessageEntityUnderline):
-                        final_entities.append(MessageEntityUnderline(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                    elif isinstance(entity, MessageEntitySpoiler):
-                        final_entities.append(MessageEntitySpoiler(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                    elif isinstance(entity, MessageEntityBlockquote):
-                        final_entities.append(MessageEntityBlockquote(
-                            offset=new_offset,
-                            length=entity.length
-                        ))
-                except Exception:
-                    continue
-        adjusted_entities = final_entities
-
-    return new_text, adjusted_entities
+    return new_text.strip()
 
 
 def append_link_to_text(text: str, link: str) -> str:
     """Append link to the end of text"""
     if not link:
         return text
-
     if text:
         return f"{text}\n\n{link}"
     return link
@@ -382,11 +134,9 @@ async def parse_telegram_link(link: str) -> tuple:
     chat_identifier = match.group(1)
     message_id = int(match.group(2))
 
-    # If it's a numeric ID (private channel/group)
     if chat_identifier.isdigit():
         chat_id = int(f"-100{chat_identifier}")
     else:
-        # It's a username
         chat_id = chat_identifier
 
     return chat_id, message_id
@@ -395,20 +145,17 @@ async def parse_telegram_link(link: str) -> tuple:
 def check_trigger_keywords(text: str, keywords_str: str) -> bool:
     """Check if the message contains any trigger keywords"""
     if not keywords_str or not keywords_str.strip():
-        # No keywords set, allow all messages
         return True
 
     if not text:
         return False
 
     text_lower = text.lower()
-    # Keywords are comma-separated
     keywords = [kw.strip().lower() for kw in keywords_str.split(',') if kw.strip()]
 
     if not keywords:
         return True
 
-    # Check if any keyword exists in the text
     for keyword in keywords:
         if keyword in text_lower:
             return True
@@ -418,7 +165,7 @@ def check_trigger_keywords(text: str, keywords_str: str) -> bool:
 
 async def forward_message(source_channel_config: dict, message, source_event_chat_id=None):
     """Forward a message to target channel with processing"""
-    global client, is_premium_account
+    global client
 
     try:
         target_chat_id = source_channel_config['target_chat_id']
@@ -427,60 +174,31 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         trigger_keywords = source_channel_config.get('trigger_keywords', '')
         send_link_back = source_channel_config.get('send_link_back', False)
 
-        # Get original text and entities
+        # Orijinal metin ve entity'leri al
         original_text = message.text or message.caption or ''
         original_entities = message.entities or message.caption_entities or []
 
-        # Check trigger keywords
+        # Trigger keywords kontrolü
         if not check_trigger_keywords(original_text, trigger_keywords):
             logger.info(f"Message {message.id} skipped - no matching trigger keywords")
             return False
 
-        # Log entity info - detaylı
-        custom_emoji_count = sum(1 for e in original_entities if isinstance(e, MessageEntityCustomEmoji))
-        bold_count = sum(1 for e in original_entities if isinstance(e, MessageEntityBold))
-        italic_count = sum(1 for e in original_entities if isinstance(e, MessageEntityItalic))
-        text_url_count = sum(1 for e in original_entities if isinstance(e, MessageEntityTextUrl))
-
-        logger.info(f"📥 Original message - total entities: {len(original_entities)}")
-        logger.info(f"   - Custom emojis: {custom_emoji_count}, Bold: {bold_count}, Italic: {italic_count}, Text URLs: {text_url_count}")
-
-        # Debug: Entity detaylarını göster
-        for i, e in enumerate(original_entities):
-            entity_type = type(e).__name__
-            if isinstance(e, MessageEntityCustomEmoji):
-                logger.debug(f"   Entity {i}: {entity_type} offset={e.offset} length={e.length} doc_id={e.document_id}")
-            elif isinstance(e, MessageEntityTextUrl):
-                logger.debug(f"   Entity {i}: {entity_type} offset={e.offset} length={e.length} url={e.url[:30]}...")
-            else:
-                logger.debug(f"   Entity {i}: {entity_type} offset={e.offset} length={e.length}")
-
-        if custom_emoji_count > 0 and not is_premium_account:
-            logger.warning("⚠️ Custom emojis detected but account is not premium - emojis will be converted to static")
-
-        # Process message (remove links if enabled)
+        # Link kaldırma işlemi
         if remove_links:
-            final_text, final_entities = process_message_for_forwarding(
-                original_text, list(original_entities), remove_links=True
-            )
-
-            # İşlem sonrası entity detayları
-            final_custom_emoji_count = sum(1 for e in final_entities if isinstance(e, MessageEntityCustomEmoji))
-            final_bold_count = sum(1 for e in final_entities if isinstance(e, MessageEntityBold))
-            final_italic_count = sum(1 for e in final_entities if isinstance(e, MessageEntityItalic))
-
-            logger.info(f"📤 After processing - text length: {len(final_text)}, total entities: {len(final_entities)}")
-            logger.info(f"   - Custom emojis: {final_custom_emoji_count}, Bold: {final_bold_count}, Italic: {final_italic_count}")
+            # Linkleri kaldır, entity kullanma (düz metin olarak gönder)
+            final_text = remove_links_from_text(original_text, original_entities)
+            final_entities = None  # Entity kullanma
+            logger.info(f"Links removed - original: {len(original_text)} chars, final: {len(final_text)} chars")
         else:
             # Link kaldırma kapalı - orijinali aynen kullan
             final_text = original_text
-            final_entities = original_entities  # Kopyalamadan direkt kullan!
+            final_entities = original_entities
 
-        # Append link if configured
+        # Append link
         if append_link:
             final_text = append_link_to_text(final_text, append_link)
 
-        # Determine media type
+        # Media kontrolü
         has_media = message.media is not None
         media_type = None
 
@@ -492,54 +210,47 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             else:
                 media_type = 'other'
 
-        # Send to target
-        # IMPORTANT: Use formatting_entities and parse_mode=None
-        # This preserves premium emojis and prevents ** from being parsed as markdown
-        entities_to_send = final_entities if final_entities else None
-
+        # Mesajı gönder
         if has_media:
             sent_message = await client.send_file(
                 entity=target_chat_id,
                 file=message.media,
                 caption=final_text if final_text else None,
-                formatting_entities=entities_to_send,
-                parse_mode=None  # ÖNEMLİ: Markdown parse etme, entity'leri kullan
+                formatting_entities=final_entities,
+                parse_mode=None
             )
         else:
             sent_message = await client.send_message(
                 entity=target_chat_id,
                 message=final_text,
-                formatting_entities=entities_to_send,
-                parse_mode=None,  # ÖNEMLİ: Markdown parse etme, entity'leri kullan
+                formatting_entities=final_entities,
+                parse_mode=None,
                 link_preview=False
             )
 
-        # Create source link
+        # Source link oluştur
         source_chat_id = message.chat_id
         if str(source_chat_id).startswith('-100'):
             source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
         else:
             source_link = f"t.me/{source_chat_id}/{message.id}"
 
-        # Create target message link
+        # Target link oluştur
         target_link = None
         if str(target_chat_id).startswith('-100'):
             target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
         else:
             target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
 
-        # Send link back to source channel if enabled
+        # Send link back
         if send_link_back and source_event_chat_id and target_link:
             try:
-                await client.send_message(
-                    source_event_chat_id,
-                    target_link
-                )
+                await client.send_message(source_event_chat_id, target_link)
                 logger.info(f"Sent target link back to {source_event_chat_id}")
             except Exception as e:
                 logger.warning(f"Could not send link back: {e}")
 
-        # Log to database
+        # Database'e kaydet
         await db.add_post(
             source_channel_id=source_channel_config['id'],
             source_link=source_link,
@@ -593,7 +304,6 @@ async def handle_telegram_link(event, link: str):
             logger.warning(f"Could not parse link: {link}")
             return
 
-        # Get the original message
         try:
             if isinstance(chat_id, str):
                 entity = await client.get_entity(chat_id)
@@ -608,21 +318,18 @@ async def handle_telegram_link(event, link: str):
             logger.warning(f"Message not found: {link}")
             return
 
-        # Get source channel config from where the link was posted
         source_channel = await db.get_source_channel(event.chat_id)
 
         if not source_channel:
             logger.warning(f"No config for source channel {event.chat_id}")
             return
 
-        # Check daily limit
         can_post = await db.can_post_today(source_channel['id'])
         if not can_post:
             remaining = await db.get_remaining_posts_today(source_channel['id'])
             logger.info(f"Daily limit reached for channel {source_channel['id']}. Remaining: {remaining}")
             return
 
-        # Forward the message (pass source event chat_id for link back feature)
         await forward_message(source_channel, message, source_event_chat_id=event.chat_id)
 
     except Exception as e:
@@ -637,11 +344,9 @@ async def setup_message_handler():
     async def message_handler(event):
         """Handle new messages in monitored channels/groups"""
         try:
-            # Check if bot is enabled
             if not await db.is_bot_enabled():
                 return
 
-            # Check if this is a source channel
             source_channel = await db.get_source_channel(event.chat_id)
 
             if not source_channel:
@@ -650,31 +355,23 @@ async def setup_message_handler():
             message_text = event.message.text or event.message.caption or ''
             listen_type = source_channel.get('listen_type', 'direct')
 
-            # Handle based on listen type
             if listen_type == 'link':
-                # Only process telegram links in the message
                 links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
                 if links:
-                    # Reconstruct full links and process each
                     for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
                         full_link = match.group(0)
                         await handle_telegram_link(event, full_link)
-                # If no links and listen_type is 'link', ignore the message
 
             else:  # listen_type == 'direct'
-                # Check for telegram links in the message first
                 links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
                 if links:
-                    # If there are links, process them
                     for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
                         full_link = match.group(0)
                         await handle_telegram_link(event, full_link)
                 else:
-                    # No links - forward the message directly if it has content
                     if message_text or event.message.media:
-                        # Check daily limit
                         can_post = await db.can_post_today(source_channel['id'])
                         if not can_post:
                             logger.info(f"Daily limit reached for channel {source_channel['id']}")
@@ -718,13 +415,11 @@ async def graceful_shutdown(sig=None):
 
     shutdown_flag = True
 
-    # Update status to offline
     try:
         await update_bot_status('offline')
     except Exception:
         pass
 
-    # Disconnect client
     if client and client.is_connected():
         try:
             await client.disconnect()
@@ -732,7 +427,6 @@ async def graceful_shutdown(sig=None):
         except Exception as e:
             logger.error(f"Error disconnecting client: {e}")
 
-    # Close database connection
     try:
         await db.close_db()
         logger.info("Database connection closed")
@@ -749,13 +443,12 @@ def setup_signal_handlers(loop):
                 lambda s=sig: asyncio.create_task(graceful_shutdown(s))
             )
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler
             signal.signal(sig, lambda s, f: asyncio.create_task(graceful_shutdown()))
 
 
 async def start_client():
     """Start the Telegram client with StringSession"""
-    global client, is_premium_account
+    global client
 
     logger.info("Connecting with StringSession...")
     await client.connect()
@@ -766,18 +459,6 @@ async def start_client():
         raise AuthKeyUnregisteredError("Session expired or invalid")
 
     logger.info("Successfully connected with StringSession")
-
-    # Premium hesap kontrolü
-    try:
-        me = await client.get_me()
-        is_premium_account = getattr(me, 'premium', False)
-        if is_premium_account:
-            logger.info("✅ Premium hesap - tüm özellikler aktif")
-        else:
-            logger.warning("⚠️ Free hesap - bazı premium emojiler gönderilemeyebilir")
-    except Exception as e:
-        logger.warning(f"Could not check premium status: {e}")
-
     return client
 
 
@@ -789,7 +470,6 @@ async def main():
     logger.info("Starting Telegram Forwarder Bot...")
     logger.info("=" * 50)
 
-    # Validate configuration
     if not config.API_ID or not config.API_HASH:
         logger.error("API_ID and API_HASH are required!")
         logger.error("Get them from https://my.telegram.org")
@@ -804,7 +484,6 @@ async def main():
         logger.error("Run: python generate_session.py to create one")
         sys.exit(1)
 
-    # Initialize database
     try:
         await db.init_db()
         logger.info("Database initialized")
@@ -812,7 +491,6 @@ async def main():
         logger.error(f"Failed to initialize database: {e}")
         sys.exit(1)
 
-    # Create and start client
     client = create_client()
 
     try:
@@ -827,24 +505,19 @@ async def main():
         await db.close_db()
         sys.exit(1)
 
-    # Get user info
     try:
         me = await client.get_me()
         logger.info(f"Logged in as: {me.first_name} (@{me.username or 'no username'})")
     except Exception as e:
         logger.warning(f"Could not get user info: {e}")
 
-    # Setup message handler
     await setup_message_handler()
     logger.info("Message handler registered")
 
-    # Update status
     await update_bot_status('online')
 
-    # Start heartbeat
     heartbeat_task = asyncio.create_task(heartbeat())
 
-    # Get monitored channels
     try:
         channels = await db.get_active_source_channels()
         logger.info(f"Monitoring {len(channels)} channels")
@@ -857,14 +530,12 @@ async def main():
     logger.info("Bot is running...")
     logger.info("=" * 50)
 
-    # Run until disconnected or shutdown
     try:
         await client.run_until_disconnected()
     except Exception as e:
         if not shutdown_flag:
             logger.error(f"Client disconnected unexpectedly: {e}")
 
-    # Cleanup
     heartbeat_task.cancel()
     try:
         await heartbeat_task
@@ -876,7 +547,6 @@ if __name__ == '__main__':
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Setup signal handlers
     setup_signal_handlers(loop)
 
     try:
