@@ -126,6 +126,7 @@ interface SourceChannel {
   target_channel_title: string;
   target_channel_chat_id: string;
   append_link: string;
+  append_link_text: string;
   daily_limit: number;
   remove_links: boolean;
   is_active: boolean;
@@ -165,6 +166,7 @@ const emptySourceChannel: Partial<SourceChannel> = {
   target_chat_id: '',
   target_title: '',
   append_link: '',
+  append_link_text: '',
   daily_limit: 10,
   remove_links: true,
   is_active: true,
@@ -313,9 +315,13 @@ export default function Dashboard() {
         await fetchData();
         setIsSourceDialogOpen(false);
         setEditingSourceChannel(null);
+      } else {
+        const error = await response.json();
+        alert(error.error || 'Kaydedilemedi. Lutfen tekrar deneyin.');
       }
     } catch (error) {
       console.error('Error saving source channel:', error);
+      alert('Bir hata olustu. Lutfen tekrar deneyin.');
     } finally {
       setSaving(false);
     }
@@ -781,16 +787,30 @@ export default function Dashboard() {
                         <div className="border-t border-zinc-800 pt-4">
                           <h4 className="font-medium text-zinc-200 mb-3">Icerik Ayarlari</h4>
 
-                          <div className="space-y-2 mb-4">
-                            <Label htmlFor="append_link">Eklenecek Link</Label>
-                            <Input
-                              id="append_link"
-                              placeholder="https://t.me/kanaliniz"
-                              value={editingSourceChannel.append_link || ''}
-                              onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, append_link: e.target.value }))}
-                              className="bg-zinc-800 border-zinc-700"
-                            />
-                            <p className="text-xs text-zinc-500">Mesaj sonuna eklenecek link</p>
+                          <div className="grid md:grid-cols-2 gap-4 mb-4">
+                            <div className="space-y-2">
+                              <Label htmlFor="append_link">Eklenecek Link</Label>
+                              <Input
+                                id="append_link"
+                                placeholder="https://t.me/kanaliniz"
+                                value={editingSourceChannel.append_link || ''}
+                                onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, append_link: e.target.value }))}
+                                className="bg-zinc-800 border-zinc-700"
+                              />
+                              <p className="text-xs text-zinc-500">Mesaj sonuna eklenecek link URL&apos;si</p>
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label htmlFor="append_link_text">Link Metni (Opsiyonel)</Label>
+                              <Input
+                                id="append_link_text"
+                                placeholder="Kanalimiza katil"
+                                value={editingSourceChannel.append_link_text || ''}
+                                onChange={(e) => setEditingSourceChannel(prev => ({ ...prev, append_link_text: e.target.value }))}
+                                className="bg-zinc-800 border-zinc-700"
+                              />
+                              <p className="text-xs text-zinc-500">Telegram&apos;daki gibi link uzerine metin. Bos birakirsaniz URL gozukur.</p>
+                            </div>
                           </div>
 
                           <div className="grid md:grid-cols-2 gap-4">
