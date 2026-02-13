@@ -3,29 +3,28 @@ import { Pool, types } from 'pg';
 // BigInt'leri string olarak döndür (JavaScript number sınırları için)
 types.setTypeParser(20, (val) => val);
 
+// Heroku/Neon PgBouncer uyumluluğu için pool ayarları
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
     rejectUnauthorized: false
   },
-  // Timeout ayarları
-  statement_timeout: 30000,
-  query_timeout: 30000,
+  // Bağlantı ayarları
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
 export default pool;
 
 export async function query(text: string, params?: unknown[]) {
-  const client = await pool.connect();
+  // Doğrudan pool.query kullan - prepared statement kullanmaz
+  // Bu Heroku PgBouncer ve Neon ile uyumlu
   try {
-    // name: undefined ile prepared statement önbelleğini atla (Heroku PgBouncer uyumluluğu)
-    const result = await client.query({
-      text,
-      values: params,
-      name: undefined  // Prepared statement kullanma
-    });
+    const result = await pool.query(text, params);
     return result;
-  } finally {
-    client.release();
+  } catch (error) {
+    console.error('Database query error:', error);
+    throw error;
   }
 }
