@@ -34,7 +34,7 @@ import database as db
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -59,10 +59,8 @@ def create_client():
     """Create Telegram client with StringSession"""
     if not config.SESSION_STRING:
         logger.error("SESSION_STRING is required!")
-        logger.error("Run: python generate_session.py to create one")
         sys.exit(1)
 
-    logger.info("Using StringSession")
     session = StringSession(config.SESSION_STRING)
 
     return TelegramClient(
@@ -257,7 +255,6 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
 
         # Trigger keywords kontrolü
         if not check_trigger_keywords(original_text, trigger_keywords):
-            logger.info(f"Message {message.id} skipped - no matching trigger keywords")
             return False
 
         # Link kaldırma işlemi
@@ -267,7 +264,6 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             # Boş liste yerine None kullan
             if not final_entities:
                 final_entities = None
-            logger.info(f"Links removed - original: {len(original_text)} chars, final: {len(final_text)} chars, entities kept: {len(final_entities) if final_entities else 0}")
         else:
             # Link kaldırma kapalı - orijinali aynen kullan (deep copy ile)
             final_text = original_text
@@ -290,22 +286,41 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
                 media_type = 'other'
 
         # Mesajı gönder
+        # Eğer entity varsa formatting_entities kullan, yoksa parse_mode='md' kullan
+        use_entities = final_entities and len(final_entities) > 0
+
         if has_media:
-            sent_message = await client.send_file(
-                entity=target_chat_id,
-                file=message.media,
-                caption=final_text if final_text else None,
-                formatting_entities=final_entities,
-                parse_mode=None
-            )
+            if use_entities:
+                sent_message = await client.send_file(
+                    entity=target_chat_id,
+                    file=message.media,
+                    caption=final_text if final_text else None,
+                    formatting_entities=final_entities,
+                    parse_mode=None
+                )
+            else:
+                sent_message = await client.send_file(
+                    entity=target_chat_id,
+                    file=message.media,
+                    caption=final_text if final_text else None,
+                    parse_mode='md'
+                )
         else:
-            sent_message = await client.send_message(
-                entity=target_chat_id,
-                message=final_text,
-                formatting_entities=final_entities,
-                parse_mode=None,
-                link_preview=False
-            )
+            if use_entities:
+                sent_message = await client.send_message(
+                    entity=target_chat_id,
+                    message=final_text,
+                    formatting_entities=final_entities,
+                    parse_mode=None,
+                    link_preview=False
+                )
+            else:
+                sent_message = await client.send_message(
+                    entity=target_chat_id,
+                    message=final_text,
+                    parse_mode='md',
+                    link_preview=False
+                )
 
         # Source link oluştur - username varsa onu kullan
         source_chat_id = message.chat_id
@@ -318,8 +333,7 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
                 source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
             else:
                 source_link = f"t.me/{source_chat_id}/{message.id}"
-        except Exception as e:
-            logger.warning(f"Could not get source entity for link: {e}")
+        except Exception:
             if str(source_chat_id).startswith('-100'):
                 source_link = f"t.me/c/{str(source_chat_id)[4:]}/{message.id}"
             else:
@@ -338,8 +352,7 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
                 target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
             else:
                 target_link = f"https://t.me/{target_chat_id}/{sent_message.id}"
-        except Exception as e:
-            logger.warning(f"Could not get target entity for link: {e}")
+        except Exception:
             if str(target_chat_id).startswith('-100'):
                 target_link = f"https://t.me/c/{str(target_chat_id)[4:]}/{sent_message.id}"
             else:
@@ -349,9 +362,8 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         if send_link_back and source_event_chat_id and target_link:
             try:
                 await client.send_message(source_event_chat_id, target_link)
-                logger.info(f"Sent target link back to {source_event_chat_id}")
-            except Exception as e:
-                logger.warning(f"Could not send link back: {e}")
+            except Exception:
+                pass
 
         # Database'e kaydet
         await db.add_post(
@@ -367,16 +379,16 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             status='success'
         )
 
-        logger.info(f"✅ Forwarded message {message.id} from {source_chat_id} to {target_chat_id}")
+        logger.info(f"✅ {message.id} -> {target_link}")
         return True
 
     except FloodWaitError as e:
-        logger.warning(f"Flood wait: {e.seconds} seconds")
+        logger.warning(f"Flood wait: {e.seconds}s")
         await asyncio.sleep(e.seconds)
         return False
 
     except ChatWriteForbiddenError:
-        logger.error(f"Cannot write to target chat {target_chat_id}")
+        logger.error(f"Cannot write to {target_chat_id}")
         await db.add_post(
             source_channel_id=source_channel_config['id'],
             source_link=f"t.me/{message.chat_id}/{message.id}",
@@ -390,9 +402,7 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         return False
 
     except Exception as e:
-        logger.error(f"Error forwarding message: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Forward error: {e}")
         return False
 
 
@@ -404,7 +414,6 @@ async def handle_telegram_link(event, link: str):
         chat_id, message_id = await parse_telegram_link(link)
 
         if not chat_id or not message_id:
-            logger.warning(f"Could not parse link: {link}")
             return
 
         try:
@@ -413,30 +422,25 @@ async def handle_telegram_link(event, link: str):
                 message = await client.get_messages(entity, ids=message_id)
             else:
                 message = await client.get_messages(chat_id, ids=message_id)
-        except Exception as e:
-            logger.error(f"Could not fetch message from {chat_id}/{message_id}: {e}")
+        except Exception:
             return
 
         if not message:
-            logger.warning(f"Message not found: {link}")
             return
 
         source_channel = await db.get_source_channel(event.chat_id)
 
         if not source_channel:
-            logger.warning(f"No config for source channel {event.chat_id}")
             return
 
         can_post = await db.can_post_today(source_channel['id'])
         if not can_post:
-            remaining = await db.get_remaining_posts_today(source_channel['id'])
-            logger.info(f"Daily limit reached for channel {source_channel['id']}. Remaining: {remaining}")
             return
 
         await forward_message(source_channel, message, source_event_chat_id=event.chat_id)
 
     except Exception as e:
-        logger.error(f"Error handling telegram link: {e}")
+        logger.error(f"Link error: {e}")
 
 
 async def setup_message_handler():
@@ -459,7 +463,6 @@ async def setup_message_handler():
             listen_type = source_channel.get('listen_type', 'direct')
 
             if listen_type == 'link':
-                # LINK MODU: Mesajdaki linkleri bul, o linklerdeki mesajları çek ve gönder
                 links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
                 if links:
@@ -468,25 +471,23 @@ async def setup_message_handler():
                         await handle_telegram_link(event, full_link)
 
             else:  # listen_type == 'direct'
-                # DIRECT MODU: Gelen mesajı direkt al ve gönder (entity'ler korunur)
                 if message_text or event.message.media:
                     can_post = await db.can_post_today(source_channel['id'])
                     if not can_post:
-                        logger.info(f"Daily limit reached for channel {source_channel['id']}")
                         return
 
                     await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
 
         except Exception as e:
-            logger.error(f"Error in message handler: {e}")
+            logger.error(f"Handler error: {e}")
 
 
 async def update_bot_status(status: str):
     """Update bot status in database"""
     try:
         await db.set_setting('bot_status', status)
-    except Exception as e:
-        logger.error(f"Error updating bot status: {e}")
+    except Exception:
+        pass
 
 
 async def heartbeat():
@@ -496,8 +497,8 @@ async def heartbeat():
     while not shutdown_flag:
         try:
             await update_bot_status('online')
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
+        except Exception:
+            pass
 
         await asyncio.sleep(config.HEARTBEAT_INTERVAL)
 
@@ -505,11 +506,6 @@ async def heartbeat():
 async def graceful_shutdown(sig=None):
     """Handle graceful shutdown"""
     global shutdown_flag, client
-
-    if sig:
-        logger.info(f"Received signal {sig.name}, shutting down...")
-    else:
-        logger.info("Shutting down...")
 
     shutdown_flag = True
 
@@ -521,15 +517,13 @@ async def graceful_shutdown(sig=None):
     if client and client.is_connected():
         try:
             await client.disconnect()
-            logger.info("Telegram client disconnected")
-        except Exception as e:
-            logger.error(f"Error disconnecting client: {e}")
+        except Exception:
+            pass
 
     try:
         await db.close_db()
-        logger.info("Database connection closed")
-    except Exception as e:
-        logger.error(f"Error closing database: {e}")
+    except Exception:
+        pass
 
 
 def setup_signal_handlers(loop):
@@ -548,15 +542,12 @@ async def start_client():
     """Start the Telegram client with StringSession"""
     global client
 
-    logger.info("Connecting with StringSession...")
     await client.connect()
 
     if not await client.is_user_authorized():
-        logger.error("Session is not authorized! Please generate a new session string.")
-        logger.error("Run: python generate_session.py")
+        logger.error("Session expired! Run: python generate_session.py")
         raise AuthKeyUnregisteredError("Session expired or invalid")
 
-    logger.info("Successfully connected with StringSession")
     return client
 
 
@@ -564,29 +555,22 @@ async def main():
     """Main function"""
     global client, shutdown_flag
 
-    logger.info("=" * 50)
-    logger.info("Starting Telegram Forwarder Bot...")
-    logger.info("=" * 50)
-
     if not config.API_ID or not config.API_HASH:
-        logger.error("API_ID and API_HASH are required!")
-        logger.error("Get them from https://my.telegram.org")
+        logger.error("API_ID and API_HASH required!")
         sys.exit(1)
 
     if not config.DATABASE_URL:
-        logger.error("DATABASE_URL is required!")
+        logger.error("DATABASE_URL required!")
         sys.exit(1)
 
     if not config.SESSION_STRING:
-        logger.error("SESSION_STRING is required!")
-        logger.error("Run: python generate_session.py to create one")
+        logger.error("SESSION_STRING required!")
         sys.exit(1)
 
     try:
         await db.init_db()
-        logger.info("Database initialized")
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
+        logger.error(f"Database error: {e}")
         sys.exit(1)
 
     client = create_client()
@@ -594,45 +578,30 @@ async def main():
     try:
         await start_client()
     except (AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
-        logger.error(f"Authentication failed: {e}")
-        logger.error("Please generate a new session string with generate_session.py")
+        logger.error(f"Auth failed: {e}")
         await db.close_db()
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Failed to start client: {e}")
+        logger.error(f"Client error: {e}")
         await db.close_db()
         sys.exit(1)
 
     try:
         me = await client.get_me()
-        logger.info(f"Logged in as: {me.first_name} (@{me.username or 'no username'})")
-    except Exception as e:
-        logger.warning(f"Could not get user info: {e}")
+        logger.info(f"✅ {me.first_name} (@{me.username or 'no username'}) - Bot running")
+    except Exception:
+        logger.info("✅ Bot running")
 
     await setup_message_handler()
-    logger.info("Message handler registered")
-
     await update_bot_status('online')
 
     heartbeat_task = asyncio.create_task(heartbeat())
 
     try:
-        channels = await db.get_active_source_channels()
-        logger.info(f"Monitoring {len(channels)} channels")
-
-        for channel in channels:
-            logger.info(f"  - {channel['source_title'] or channel['source_chat_id']}")
-    except Exception as e:
-        logger.warning(f"Could not get channel list: {e}")
-
-    logger.info("Bot is running...")
-    logger.info("=" * 50)
-
-    try:
         await client.run_until_disconnected()
     except Exception as e:
         if not shutdown_flag:
-            logger.error(f"Client disconnected unexpectedly: {e}")
+            logger.error(f"Disconnected: {e}")
 
     heartbeat_task.cancel()
     try:
@@ -650,10 +619,9 @@ if __name__ == '__main__':
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
         loop.run_until_complete(graceful_shutdown())
     except Exception as e:
-        logger.error(f"Bot crashed: {e}")
+        logger.error(f"Crashed: {e}")
         loop.run_until_complete(graceful_shutdown())
     finally:
         loop.close()
