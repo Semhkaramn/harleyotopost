@@ -11,6 +11,15 @@ from telethon.tl.types import (
     MessageEntityTextUrl,
     MessageEntityUrl,
     MessageEntityMention,
+    MessageEntityCustomEmoji,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
+    MessageEntityPre,
+    MessageEntityStrike,
+    MessageEntityUnderline,
+    MessageEntitySpoiler,
+    MessageEntityBlockquote,
 )
 from telethon.errors import (
     FloodWaitError,
@@ -65,79 +74,160 @@ def create_client():
     )
 
 
+def utf16_len(text: str) -> int:
+    """Get UTF-16 length of text (Telegram uses UTF-16 for entity offsets)"""
+    return len(text.encode('utf-16-le')) // 2
+
+
+def utf16_to_utf8_offset(text: str, utf16_offset: int) -> int:
+    """Convert UTF-16 offset to UTF-8 string index"""
+    encoded = text.encode('utf-16-le')
+    # Each UTF-16 code unit is 2 bytes
+    byte_offset = utf16_offset * 2
+    if byte_offset > len(encoded):
+        byte_offset = len(encoded)
+    decoded = encoded[:byte_offset].decode('utf-16-le', errors='ignore')
+    return len(decoded)
+
+
+def copy_entity(entity):
+    """Create a deep copy of an entity"""
+    from copy import deepcopy
+    return deepcopy(entity)
+
+
 def clean_message_with_entities(text: str, entities: list, remove_links: bool) -> tuple:
     """
     Clean message text and entities.
     - Removes hyperlinked text (text with attached links) when remove_links is True
     - Removes plain URLs and @mentions when remove_links is True
     - Keeps all formatting (bold, italic, etc.)
-    - Keeps all emojis (normal and premium)
+    - Keeps all emojis (normal and premium/custom)
 
     Returns: (cleaned_text, cleaned_entities)
     """
     if not text:
-        return text, entities
+        return text, entities if entities else []
 
     if not remove_links:
-        return text, entities
+        # Still need to copy entities to avoid mutation
+        if entities:
+            return text, [copy_entity(e) for e in entities]
+        return text, []
 
-    if not entities:
-        # No entities, just remove plain URLs
-        cleaned = URL_PATTERN.sub('', text)
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        cleaned = re.sub(r' {2,}', ' ', cleaned)
-        return cleaned.strip(), []
-
-    # Collect ranges to remove (hyperlinked text, URLs, mentions)
-    ranges_to_remove = []
+    # First, collect ranges to remove from entities
+    ranges_to_remove = []  # List of (utf16_start, utf16_end) tuples
     entities_to_keep = []
 
-    for entity in entities:
-        # Check if this is a link-related entity
-        if isinstance(entity, MessageEntityTextUrl):
-            # Hyperlinked text - remove the entire text range
-            ranges_to_remove.append((entity.offset, entity.offset + entity.length))
-        elif isinstance(entity, MessageEntityUrl):
-            # Plain URL in text - remove it
-            ranges_to_remove.append((entity.offset, entity.offset + entity.length))
-        elif isinstance(entity, MessageEntityMention):
-            # @mention - remove it
-            ranges_to_remove.append((entity.offset, entity.offset + entity.length))
-        else:
-            # Keep other entities (bold, italic, emoji, etc.)
-            entities_to_keep.append(entity)
+    if entities:
+        for entity in entities:
+            # Check if this is a link-related entity
+            if isinstance(entity, MessageEntityTextUrl):
+                # Hyperlinked text - remove the entire text range
+                ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+            elif isinstance(entity, MessageEntityUrl):
+                # Plain URL in text - remove it
+                ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+            elif isinstance(entity, MessageEntityMention):
+                # @mention - remove it
+                ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+            else:
+                # Keep other entities (bold, italic, emoji, custom emoji, etc.)
+                entities_to_keep.append(copy_entity(entity))
 
-    # Sort ranges by start position (descending) to remove from end to start
-    ranges_to_remove.sort(key=lambda x: x[0], reverse=True)
+    # Also find plain URLs in text that don't have entities
+    # Convert text to work with UTF-16 offsets
+    for match in URL_PATTERN.finditer(text):
+        start_utf8 = match.start()
+        end_utf8 = match.end()
+        # Convert to UTF-16 offsets
+        start_utf16 = utf16_len(text[:start_utf8])
+        end_utf16 = start_utf16 + utf16_len(match.group())
 
-    # Remove the ranges from text
-    cleaned_text = text
-    for start, end in ranges_to_remove:
-        cleaned_text = cleaned_text[:start] + cleaned_text[end:]
-
-    # Adjust entity offsets for kept entities
-    adjusted_entities = []
-    for entity in entities_to_keep:
-        new_offset = entity.offset
-        new_length = entity.length
-
-        # Calculate how much to shift based on removed ranges before this entity
-        shift = 0
-        entity_removed = False
-
-        for start, end in sorted(ranges_to_remove, key=lambda x: x[0]):
-            removed_length = end - start
-
-            if end <= entity.offset:
-                # Removed range is completely before entity
-                shift += removed_length
-            elif start < entity.offset + entity.length and end > entity.offset:
-                # Removed range overlaps with entity - entity is affected
-                entity_removed = True
+        # Check if this range is already covered by an entity
+        already_covered = False
+        for r_start, r_end in ranges_to_remove:
+            if r_start <= start_utf16 and r_end >= end_utf16:
+                already_covered = True
                 break
 
-        if not entity_removed:
-            entity.offset = new_offset - shift
+        if not already_covered:
+            ranges_to_remove.append((start_utf16, end_utf16))
+
+    if not ranges_to_remove:
+        # No links to remove, just clean whitespace
+        cleaned = re.sub(r'\n{3,}', '\n\n', text)
+        cleaned = re.sub(r' {2,}', ' ', cleaned)
+        return cleaned.strip(), entities_to_keep
+
+    # Merge overlapping ranges
+    ranges_to_remove.sort(key=lambda x: x[0])
+    merged_ranges = []
+    for start, end in ranges_to_remove:
+        if merged_ranges and start <= merged_ranges[-1][1]:
+            merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
+        else:
+            merged_ranges.append((start, end))
+
+    # Sort ranges by start position (descending) to remove from end to start
+    merged_ranges.sort(key=lambda x: x[0], reverse=True)
+
+    # Convert text to list of UTF-16 code units for manipulation
+    # We'll work with the string directly but track UTF-16 positions
+    cleaned_text = text
+
+    # Remove ranges from end to start to maintain correct offsets
+    for utf16_start, utf16_end in merged_ranges:
+        # Convert UTF-16 offsets to string indices
+        str_start = utf16_to_utf8_offset(cleaned_text, utf16_start)
+        str_end = utf16_to_utf8_offset(cleaned_text, utf16_end)
+        cleaned_text = cleaned_text[:str_start] + cleaned_text[str_end:]
+
+    # Calculate new offsets for kept entities
+    # Sort ranges ascending for offset calculation
+    sorted_ranges = sorted(merged_ranges, key=lambda x: x[0])
+
+    adjusted_entities = []
+    for entity in entities_to_keep:
+        original_offset = entity.offset
+        original_length = entity.length
+        entity_end = original_offset + original_length
+
+        # Calculate shift and check if entity is affected
+        shift = 0
+        entity_removed = False
+        new_length = original_length
+
+        for r_start, r_end in sorted_ranges:
+            removed_length = r_end - r_start
+
+            if r_end <= original_offset:
+                # Range is completely before entity - shift offset
+                shift += removed_length
+            elif r_start >= entity_end:
+                # Range is completely after entity - no effect
+                pass
+            elif r_start <= original_offset and r_end >= entity_end:
+                # Range completely contains entity - remove it
+                entity_removed = True
+                break
+            elif r_start > original_offset and r_end < entity_end:
+                # Range is inside entity - reduce length
+                new_length -= removed_length
+            elif r_start <= original_offset < r_end < entity_end:
+                # Range overlaps start of entity
+                overlap = r_end - original_offset
+                shift += (r_start - original_offset) if r_start < original_offset else 0
+                new_length -= overlap
+                entity_removed = True  # Partial removal is tricky, skip
+                break
+            elif original_offset < r_start < entity_end <= r_end:
+                # Range overlaps end of entity
+                new_length = r_start - original_offset
+
+        if not entity_removed and new_length > 0:
+            entity.offset = original_offset - shift
+            entity.length = new_length
             if entity.offset >= 0:
                 adjusted_entities.append(entity)
 
@@ -145,7 +235,25 @@ def clean_message_with_entities(text: str, entities: list, remove_links: bool) -
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
     cleaned_text = re.sub(r' {2,}', ' ', cleaned_text)
 
-    return cleaned_text.strip(), adjusted_entities
+    # Handle strip carefully to adjust entity offsets
+    if cleaned_text:
+        # Count leading whitespace/newlines
+        leading_stripped = len(cleaned_text) - len(cleaned_text.lstrip())
+        if leading_stripped > 0:
+            # Convert to UTF-16 length for offset adjustment
+            leading_utf16 = utf16_len(cleaned_text[:leading_stripped])
+            # Adjust all entity offsets
+            for entity in adjusted_entities:
+                entity.offset -= leading_utf16
+            cleaned_text = cleaned_text.lstrip()
+
+        # Strip trailing (doesn't affect offsets)
+        cleaned_text = cleaned_text.rstrip()
+
+    # Remove entities with negative offsets (they got stripped away)
+    adjusted_entities = [e for e in adjusted_entities if e.offset >= 0]
+
+    return cleaned_text, adjusted_entities
 
 
 def append_link_to_text(text: str, link: str) -> str:
@@ -221,9 +329,20 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             logger.info(f"Message {message.id} skipped - no matching trigger keywords")
             return False
 
+        # Log original entities for debugging
+        logger.info(f"Original entities count: {len(original_entities)}")
+        for i, ent in enumerate(original_entities):
+            logger.debug(f"  Entity {i}: {type(ent).__name__} at {ent.offset}:{ent.length}")
+
         # Clean text and entities (removes hyperlinked text, URLs, mentions if remove_links is True)
         # Keeps all formatting (bold, italic, etc.) and emojis (normal and premium)
         cleaned_text, cleaned_entities = clean_message_with_entities(original_text, original_entities, remove_links)
+
+        # Log cleaned entities for debugging
+        logger.info(f"Cleaned entities count: {len(cleaned_entities)}")
+        for i, ent in enumerate(cleaned_entities):
+            logger.debug(f"  Entity {i}: {type(ent).__name__} at {ent.offset}:{ent.length}")
+
         final_text = append_link_to_text(cleaned_text, append_link)
 
         # Determine media type
@@ -239,20 +358,23 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
                 media_type = 'other'
 
         # Send to target with entities (preserves formatting and emojis including premium)
+        # Important: Only pass entities if there are any, otherwise set to None
+        entities_to_send = cleaned_entities if cleaned_entities else None
+
         if has_media:
             # Forward with media
             sent_message = await client.send_file(
                 target_chat_id,
                 message.media,
                 caption=final_text if final_text else None,
-                formatting_entities=cleaned_entities if cleaned_entities else None
+                formatting_entities=entities_to_send
             )
         else:
             # Text only
             sent_message = await client.send_message(
                 target_chat_id,
                 final_text,
-                formatting_entities=cleaned_entities if cleaned_entities else None
+                formatting_entities=entities_to_send
             )
 
         # Create source link
