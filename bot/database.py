@@ -1,7 +1,10 @@
 import asyncpg
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
+import logging
 import config
+
+logger = logging.getLogger(__name__)
 
 pool: Optional[asyncpg.Pool] = None
 
@@ -9,7 +12,21 @@ pool: Optional[asyncpg.Pool] = None
 async def init_db():
     """Initialize database connection pool and create tables"""
     global pool
-    pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
+
+    if not config.DATABASE_URL:
+        raise ValueError("DATABASE_URL is not configured")
+
+    try:
+        pool = await asyncpg.create_pool(
+            config.DATABASE_URL,
+            min_size=1,
+            max_size=10,
+            command_timeout=60
+        )
+        logger.info("Database connection pool created")
+    except Exception as e:
+        logger.error(f"Failed to create database pool: {e}")
+        raise
 
     async with pool.acquire() as conn:
         # Global settings table
@@ -59,43 +76,24 @@ async def init_db():
         ''')
 
         # Add new columns if they don't exist (for existing databases)
-        try:
-            await conn.execute('''
-                ALTER TABLE source_channels
-                ADD COLUMN IF NOT EXISTS listen_type VARCHAR(20) DEFAULT 'direct'
-            ''')
-        except Exception:
-            pass
+        migration_queries = [
+            "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS listen_type VARCHAR(20) DEFAULT 'direct'",
+            "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS trigger_keywords TEXT DEFAULT ''",
+            "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS send_link_back BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE source_channels ADD COLUMN IF NOT EXISTS target_channel_id INTEGER",
+        ]
 
-        try:
-            await conn.execute('''
-                ALTER TABLE source_channels
-                ADD COLUMN IF NOT EXISTS trigger_keywords TEXT DEFAULT ''
-            ''')
-        except Exception:
-            pass
-
-        try:
-            await conn.execute('''
-                ALTER TABLE source_channels
-                ADD COLUMN IF NOT EXISTS send_link_back BOOLEAN DEFAULT FALSE
-            ''')
-        except Exception:
-            pass
-
-        try:
-            await conn.execute('''
-                ALTER TABLE source_channels
-                ADD COLUMN IF NOT EXISTS target_channel_id INTEGER
-            ''')
-        except Exception:
-            pass
+        for query in migration_queries:
+            try:
+                await conn.execute(query)
+            except Exception as e:
+                logger.debug(f"Migration query skipped (may already exist): {e}")
 
         # Posts history
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS posts (
                 id SERIAL PRIMARY KEY,
-                source_channel_id INTEGER REFERENCES source_channels(id),
+                source_channel_id INTEGER REFERENCES source_channels(id) ON DELETE SET NULL,
                 source_link TEXT NOT NULL,
                 source_chat_id BIGINT,
                 source_message_id BIGINT,
@@ -114,7 +112,7 @@ async def init_db():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS daily_stats (
                 id SERIAL PRIMARY KEY,
-                source_channel_id INTEGER REFERENCES source_channels(id),
+                source_channel_id INTEGER REFERENCES source_channels(id) ON DELETE CASCADE,
                 date DATE NOT NULL,
                 post_count INTEGER DEFAULT 0,
                 success_count INTEGER DEFAULT 0,
@@ -135,18 +133,32 @@ async def init_db():
                 ON CONFLICT (key) DO NOTHING
             ''', key, value)
 
+    logger.info("Database tables initialized")
+
 
 async def close_db():
     """Close database connection pool"""
     global pool
     if pool:
-        await pool.close()
+        try:
+            await pool.close()
+            pool = None
+            logger.info("Database connection pool closed")
+        except Exception as e:
+            logger.error(f"Error closing database pool: {e}")
+
+
+def _check_pool():
+    """Check if pool is initialized"""
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized. Call init_db() first.")
 
 
 # ============== GLOBAL SETTINGS ==============
 
 async def get_setting(key: str) -> Optional[str]:
     """Get a global setting value"""
+    _check_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow('SELECT value FROM settings WHERE key = $1', key)
         return row['value'] if row else None
@@ -154,6 +166,7 @@ async def get_setting(key: str) -> Optional[str]:
 
 async def set_setting(key: str, value: str):
     """Set a global setting value"""
+    _check_pool()
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP)
@@ -163,6 +176,7 @@ async def set_setting(key: str, value: str):
 
 async def get_all_settings() -> Dict[str, str]:
     """Get all global settings"""
+    _check_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT key, value FROM settings')
         return {row['key']: row['value'] for row in rows}
@@ -170,14 +184,19 @@ async def get_all_settings() -> Dict[str, str]:
 
 async def is_bot_enabled() -> bool:
     """Check if bot is enabled"""
-    val = await get_setting('bot_enabled')
-    return val == 'true'
+    try:
+        val = await get_setting('bot_enabled')
+        return val == 'true'
+    except Exception as e:
+        logger.error(f"Error checking bot enabled status: {e}")
+        return True  # Default to enabled if can't check
 
 
 # ============== TARGET CHANNELS ==============
 
 async def get_target_channel(channel_id: int) -> Optional[Dict[str, Any]]:
     """Get a target channel by ID"""
+    _check_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             'SELECT * FROM target_channels WHERE id = $1 AND is_active = TRUE',
@@ -188,6 +207,7 @@ async def get_target_channel(channel_id: int) -> Optional[Dict[str, Any]]:
 
 async def get_all_target_channels() -> List[Dict[str, Any]]:
     """Get all target channels"""
+    _check_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT * FROM target_channels WHERE is_active = TRUE ORDER BY created_at DESC')
         return [dict(row) for row in rows]
@@ -211,6 +231,7 @@ async def add_source_channel(
     target_channel_id: int = None
 ) -> int:
     """Add or update a source channel configuration"""
+    _check_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow('''
             INSERT INTO source_channels
@@ -253,6 +274,7 @@ async def update_source_channel(
     target_channel_id: int = None
 ):
     """Update source channel settings"""
+    _check_pool()
     async with pool.acquire() as conn:
         updates = []
         values = [source_chat_id]
@@ -307,12 +329,14 @@ async def update_source_channel(
 
 async def remove_source_channel(source_chat_id: int):
     """Remove a source channel"""
+    _check_pool()
     async with pool.acquire() as conn:
         await conn.execute('DELETE FROM source_channels WHERE source_chat_id = $1', source_chat_id)
 
 
 async def get_source_channel(source_chat_id: int) -> Optional[Dict[str, Any]]:
     """Get a source channel by chat ID"""
+    _check_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             'SELECT * FROM source_channels WHERE source_chat_id = $1 AND is_active = TRUE',
@@ -323,6 +347,7 @@ async def get_source_channel(source_chat_id: int) -> Optional[Dict[str, Any]]:
 
 async def get_all_source_channels() -> List[Dict[str, Any]]:
     """Get all source channels"""
+    _check_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT * FROM source_channels ORDER BY created_at DESC')
         return [dict(row) for row in rows]
@@ -330,6 +355,7 @@ async def get_all_source_channels() -> List[Dict[str, Any]]:
 
 async def get_active_source_channels() -> List[Dict[str, Any]]:
     """Get all active source channels"""
+    _check_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch('SELECT * FROM source_channels WHERE is_active = TRUE')
         return [dict(row) for row in rows]
@@ -356,6 +382,7 @@ async def add_post(
     status: str = 'success'
 ) -> int:
     """Add a new post record"""
+    _check_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow('''
             INSERT INTO posts
@@ -367,13 +394,17 @@ async def add_post(
             target_chat_id, target_message_id, message_text, has_media, media_type, status)
 
         # Update daily stats
-        await update_daily_stats(source_channel_id, status == 'success')
+        try:
+            await update_daily_stats(source_channel_id, status == 'success')
+        except Exception as e:
+            logger.warning(f"Failed to update daily stats: {e}")
 
         return row['id']
 
 
 async def get_today_post_count(source_channel_id: int) -> int:
     """Get number of successful posts made today for a source channel"""
+    _check_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow('''
             SELECT COUNT(*) as count FROM posts
@@ -381,11 +412,12 @@ async def get_today_post_count(source_channel_id: int) -> int:
             AND DATE(created_at) = CURRENT_DATE
             AND status = 'success'
         ''', source_channel_id)
-        return row['count']
+        return row['count'] if row else 0
 
 
 async def get_total_post_count(source_channel_id: int = None) -> int:
     """Get total number of successful posts"""
+    _check_pool()
     async with pool.acquire() as conn:
         if source_channel_id:
             row = await conn.fetchrow('''
@@ -394,11 +426,12 @@ async def get_total_post_count(source_channel_id: int = None) -> int:
             ''', source_channel_id)
         else:
             row = await conn.fetchrow("SELECT COUNT(*) as count FROM posts WHERE status = 'success'")
-        return row['count']
+        return row['count'] if row else 0
 
 
 async def get_recent_posts(limit: int = 50, source_channel_id: int = None) -> List[Dict[str, Any]]:
     """Get recent posts"""
+    _check_pool()
     async with pool.acquire() as conn:
         if source_channel_id:
             rows = await conn.fetch('''
@@ -420,38 +453,49 @@ async def get_recent_posts(limit: int = 50, source_channel_id: int = None) -> Li
 
 async def can_post_today(source_channel_id: int) -> bool:
     """Check if we can still post today for this source channel"""
-    async with pool.acquire() as conn:
-        # Get channel's daily limit
-        channel = await conn.fetchrow(
-            'SELECT daily_limit FROM source_channels WHERE id = $1',
-            source_channel_id
-        )
-        if not channel:
-            return False
+    _check_pool()
+    try:
+        async with pool.acquire() as conn:
+            # Get channel's daily limit
+            channel = await conn.fetchrow(
+                'SELECT daily_limit FROM source_channels WHERE id = $1',
+                source_channel_id
+            )
+            if not channel:
+                return False
 
-        # Get today's count
-        today_count = await get_today_post_count(source_channel_id)
-        return today_count < channel['daily_limit']
+            # Get today's count
+            today_count = await get_today_post_count(source_channel_id)
+            return today_count < channel['daily_limit']
+    except Exception as e:
+        logger.error(f"Error checking daily limit: {e}")
+        return True  # Allow posting if can't check
 
 
 async def get_remaining_posts_today(source_channel_id: int) -> int:
     """Get remaining posts allowed today"""
-    async with pool.acquire() as conn:
-        channel = await conn.fetchrow(
-            'SELECT daily_limit FROM source_channels WHERE id = $1',
-            source_channel_id
-        )
-        if not channel:
-            return 0
+    _check_pool()
+    try:
+        async with pool.acquire() as conn:
+            channel = await conn.fetchrow(
+                'SELECT daily_limit FROM source_channels WHERE id = $1',
+                source_channel_id
+            )
+            if not channel:
+                return 0
 
-        today_count = await get_today_post_count(source_channel_id)
-        return max(0, channel['daily_limit'] - today_count)
+            today_count = await get_today_post_count(source_channel_id)
+            return max(0, channel['daily_limit'] - today_count)
+    except Exception as e:
+        logger.error(f"Error getting remaining posts: {e}")
+        return 0
 
 
 # ============== STATS ==============
 
 async def update_daily_stats(source_channel_id: int, success: bool):
     """Update daily statistics"""
+    _check_pool()
     async with pool.acquire() as conn:
         today = date.today()
 
@@ -475,6 +519,7 @@ async def update_daily_stats(source_channel_id: int, success: bool):
 
 async def get_stats_summary() -> Dict[str, Any]:
     """Get overall stats summary"""
+    _check_pool()
     async with pool.acquire() as conn:
         # Today's totals
         today_row = await conn.fetchrow('''
@@ -504,17 +549,18 @@ async def get_stats_summary() -> Dict[str, Any]:
         ''')
 
         return {
-            'today_posts': today_row['today_posts'],
-            'today_success': today_row['today_success'],
-            'today_failed': today_row['today_failed'],
-            'total_posts': total_row['total'],
-            'active_channels': channels_row['count'],
+            'today_posts': today_row['today_posts'] if today_row else 0,
+            'today_success': today_row['today_success'] if today_row else 0,
+            'today_failed': today_row['today_failed'] if today_row else 0,
+            'total_posts': total_row['total'] if total_row else 0,
+            'active_channels': channels_row['count'] if channels_row else 0,
             'weekly_stats': [dict(row) for row in weekly_rows]
         }
 
 
 async def get_channel_stats(source_channel_id: int) -> Dict[str, Any]:
     """Get stats for a specific source channel"""
+    _check_pool()
     async with pool.acquire() as conn:
         today_count = await get_today_post_count(source_channel_id)
         total_count = await get_total_post_count(source_channel_id)
