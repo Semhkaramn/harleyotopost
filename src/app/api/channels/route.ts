@@ -1,11 +1,28 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 
+// Ensure table structure is updated
+async function ensureTableStructure() {
+  try {
+    // Add target_channel_id column if it doesn't exist
+    await query(`
+      ALTER TABLE source_channels
+      ADD COLUMN IF NOT EXISTS target_channel_id INTEGER
+    `);
+  } catch {
+    // Column might already exist, ignore error
+  }
+}
+
 export async function GET() {
   try {
+    await ensureTableStructure();
+
     const result = await query(`
       SELECT
         sc.*,
+        tc.title as target_channel_title,
+        tc.chat_id as target_channel_chat_id,
         COALESCE(
           (SELECT COUNT(*) FROM posts p
            WHERE p.source_channel_id = sc.id
@@ -18,6 +35,7 @@ export async function GET() {
            AND p.status = 'success'), 0
         ) as total_posts
       FROM source_channels sc
+      LEFT JOIN target_channels tc ON sc.target_channel_id = tc.id
       ORDER BY sc.created_at DESC
     `);
 
@@ -30,9 +48,12 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    await ensureTableStructure();
+
     const body = await request.json();
     const {
       source_chat_id,
+      target_channel_id,
       target_chat_id,
       source_title,
       source_username,
@@ -46,32 +67,49 @@ export async function POST(request: Request) {
       send_link_back
     } = body;
 
+    // If target_channel_id is provided, get the target chat_id from target_channels
+    let finalTargetChatId = target_chat_id;
+    let finalTargetTitle = target_title;
+
+    if (target_channel_id) {
+      const targetChannel = await query(
+        'SELECT chat_id, title FROM target_channels WHERE id = $1',
+        [target_channel_id]
+      );
+      if (targetChannel.rows[0]) {
+        finalTargetChatId = targetChannel.rows[0].chat_id;
+        finalTargetTitle = targetChannel.rows[0].title;
+      }
+    }
+
     const result = await query(
       `INSERT INTO source_channels
-       (source_chat_id, target_chat_id, source_title, source_username,
+       (source_chat_id, target_chat_id, target_channel_id, source_title, source_username,
         target_title, append_link, daily_limit, remove_links, remove_emojis,
         listen_type, trigger_keywords, send_link_back)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (source_chat_id) DO UPDATE SET
          target_chat_id = $2,
-         source_title = COALESCE($3, source_channels.source_title),
-         source_username = COALESCE($4, source_channels.source_username),
-         target_title = COALESCE($5, source_channels.target_title),
-         append_link = $6,
-         daily_limit = $7,
-         remove_links = $8,
-         remove_emojis = $9,
-         listen_type = $10,
-         trigger_keywords = $11,
-         send_link_back = $12,
+         target_channel_id = $3,
+         source_title = COALESCE($4, source_channels.source_title),
+         source_username = COALESCE($5, source_channels.source_username),
+         target_title = COALESCE($6, source_channels.target_title),
+         append_link = $7,
+         daily_limit = $8,
+         remove_links = $9,
+         remove_emojis = $10,
+         listen_type = $11,
+         trigger_keywords = $12,
+         send_link_back = $13,
          updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
       [
         source_chat_id,
-        target_chat_id,
+        finalTargetChatId,
+        target_channel_id || null,
         source_title || null,
         source_username || null,
-        target_title || null,
+        finalTargetTitle || null,
         append_link || '',
         daily_limit || 4,
         remove_links !== false,
@@ -91,12 +129,41 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    await ensureTableStructure();
+
     const body = await request.json();
-    const { id, ...updates } = body;
+    const { id, target_channel_id, ...updates } = body;
 
     const setClause: string[] = [];
     const values: unknown[] = [id];
     let paramIndex = 2;
+
+    // If target_channel_id is being updated, also update target_chat_id and target_title
+    if (target_channel_id !== undefined) {
+      if (target_channel_id) {
+        const targetChannel = await query(
+          'SELECT chat_id, title FROM target_channels WHERE id = $1',
+          [target_channel_id]
+        );
+        if (targetChannel.rows[0]) {
+          setClause.push(`target_channel_id = $${paramIndex}`);
+          values.push(target_channel_id);
+          paramIndex++;
+
+          setClause.push(`target_chat_id = $${paramIndex}`);
+          values.push(targetChannel.rows[0].chat_id);
+          paramIndex++;
+
+          setClause.push(`target_title = $${paramIndex}`);
+          values.push(targetChannel.rows[0].title);
+          paramIndex++;
+        }
+      } else {
+        setClause.push(`target_channel_id = $${paramIndex}`);
+        values.push(null);
+        paramIndex++;
+      }
+    }
 
     const allowedFields = [
       'target_chat_id', 'source_title', 'target_title',
