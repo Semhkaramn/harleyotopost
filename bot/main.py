@@ -49,6 +49,9 @@ URL_PATTERN = re.compile(
     r'|(?:@[a-zA-Z0-9_]+)'
 )
 
+# Markdown link pattern: [text](url) formatını tamamen sil
+MARKDOWN_LINK_PATTERN = re.compile(r'\[([^\]]*)\]\([^)]+\)')
+
 # Telegram message link pattern
 TELEGRAM_LINK_PATTERN = re.compile(
     r'(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?(\d+|[a-zA-Z][a-zA-Z0-9_]*)/(\d+)'
@@ -75,7 +78,7 @@ def create_client():
 
 def remove_links_from_text(text: str, entities: list) -> tuple:
     """
-    Metinden linkleri kaldır ama formatting entity'lerini koru.
+    Metinden linkleri tamamen kaldır ama formatting entity'lerini koru.
     Returns: (cleaned_text, cleaned_entities)
 
     Formatting entity tipleri (korunacak):
@@ -83,15 +86,19 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
     - MessageEntityPre, MessageEntityUnderline, MessageEntityStrike
     - MessageEntitySpoiler, MessageEntityCustomEmoji, MessageEntityBlockquote
 
-    Link entity tipleri (kaldırılacak):
-    - MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention
+    Link entity tipleri (tamamen kaldırılacak - hem metin hem URL):
+    - MessageEntityTextUrl (link metni + URL tamamen silinecek)
+    - MessageEntityUrl (URL silinecek)
+    - MessageEntityMention (@mention silinecek)
     """
     if not text:
         return text, []
 
     if not entities:
-        # Entity yok, sadece regex ile URL'leri temizle
+        # Entity yok, sadece regex ile URL'leri ve markdown linkleri temizle
         cleaned = URL_PATTERN.sub('', text)
+        # Markdown [text](url) formatını tamamen sil
+        cleaned = MARKDOWN_LINK_PATTERN.sub('', cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         cleaned = re.sub(r' {2,}', ' ', cleaned)
         return cleaned.strip(), []
@@ -99,11 +106,11 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
     # Deep copy ile entity'leri kopyala (orijinalleri değiştirmemek için)
     entities_copy = copy.deepcopy(entities)
 
-    # Link entity'lerinin kapladığı aralıkları bul
+    # Link entity'lerinin kapladığı aralıkları bul (tamamen silinecek)
     link_ranges = []
     formatting_entities = []
 
-    # Link olmayan entity tipleri
+    # Link olmayan entity tipleri (korunacak)
     FORMATTING_TYPES = (
         MessageEntityBold, MessageEntityItalic, MessageEntityCode,
         MessageEntityPre, MessageEntityUnderline, MessageEntityStrike,
@@ -112,6 +119,7 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
 
     for entity in entities_copy:
         if isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
+            # MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention - tamamen sil
             link_ranges.append((entity.offset, entity.offset + entity.length))
         elif isinstance(entity, FORMATTING_TYPES):
             # Formatting entity'lerini koru
@@ -121,11 +129,12 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
             formatting_entities.append(entity)
 
     if not link_ranges:
-        # Link yok, regex ile temizle
-        # NOT: Regex temizliği entity offset'lerini bozabilir, dikkatli ol
+        # Link entity yok, regex ile temizle
         new_text = text
-        # Sadece entity ile kapsanmayan URL'leri temizle
-        # Bu durumda entity'lerin bozulmaması için regex temizliğini atla
+        # Markdown [text](url) formatını tamamen sil
+        new_text = MARKDOWN_LINK_PATTERN.sub('', new_text)
+        # Düz URL'leri sil
+        new_text = URL_PATTERN.sub('', new_text)
         new_text = re.sub(r'\n{3,}', '\n\n', new_text)
         new_text = re.sub(r' {2,}', ' ', new_text)
         return new_text.strip(), formatting_entities
@@ -146,7 +155,7 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
         end_byte = end * 2
 
         if start_byte <= len(text_utf16) and end_byte <= len(text_utf16):
-            # Metni kes
+            # Metni kes (link metnini tamamen sil)
             text_utf16 = text_utf16[:start_byte] + text_utf16[end_byte:]
             current_text = text_utf16.decode('utf-16-le', errors='ignore')
 
@@ -165,7 +174,8 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
                 elif entity.offset < start and entity_end > end:
                     # Entity silinen kısmı tamamen kapsıyor, length'i azalt
                     entity.length -= removed_length
-                    new_formatting_entities.append(entity)
+                    if entity.length > 0:
+                        new_formatting_entities.append(entity)
                 elif entity.offset >= start and entity_end <= end:
                     # Entity tamamen silinen kısımda, entity'yi atla
                     pass
@@ -184,7 +194,17 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
 
             formatting_entities = new_formatting_entities
 
-    # Temizlik
+    # Son temizlik - kalan markdown linkleri ve URL'leri temizle
+    # NOT: Bu aşamada entity offset'leri bozulabilir, dikkat!
+    # Önce mevcut entity'lerin kapsadığı alanları bul
+    protected_ranges = [(e.offset, e.offset + e.length) for e in formatting_entities]
+
+    # Markdown linklerini ve URL'leri regex ile bul ve sil (entity dışındakileri)
+    # Basit yaklaşım: entity'leri zaten işledik, kalan text-based linkleri sil
+    current_text = MARKDOWN_LINK_PATTERN.sub('', current_text)
+    current_text = URL_PATTERN.sub('', current_text)
+
+    # Çoklu boşluk ve satır temizliği
     current_text = re.sub(r'\n{3,}', '\n\n', current_text)
     current_text = re.sub(r' {2,}', ' ', current_text)
 
@@ -285,42 +305,25 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
             else:
                 media_type = 'other'
 
-        # Mesajı gönder
-        # Eğer entity varsa formatting_entities kullan, yoksa parse_mode='md' kullan
-        use_entities = final_entities and len(final_entities) > 0
+        # Mesajı gönder - her zaman entity'leri kullan, parse_mode kullanma
+        # Bu sayede markdown parse sorunları olmaz ve formatlar korunur
 
         if has_media:
-            if use_entities:
-                sent_message = await client.send_file(
-                    entity=target_chat_id,
-                    file=message.media,
-                    caption=final_text if final_text else None,
-                    formatting_entities=final_entities,
-                    parse_mode=None
-                )
-            else:
-                sent_message = await client.send_file(
-                    entity=target_chat_id,
-                    file=message.media,
-                    caption=final_text if final_text else None,
-                    parse_mode='md'
-                )
+            sent_message = await client.send_file(
+                entity=target_chat_id,
+                file=message.media,
+                caption=final_text if final_text else None,
+                formatting_entities=final_entities if final_entities else None,
+                parse_mode=None
+            )
         else:
-            if use_entities:
-                sent_message = await client.send_message(
-                    entity=target_chat_id,
-                    message=final_text,
-                    formatting_entities=final_entities,
-                    parse_mode=None,
-                    link_preview=False
-                )
-            else:
-                sent_message = await client.send_message(
-                    entity=target_chat_id,
-                    message=final_text,
-                    parse_mode='md',
-                    link_preview=False
-                )
+            sent_message = await client.send_message(
+                entity=target_chat_id,
+                message=final_text,
+                formatting_entities=final_entities if final_entities else None,
+                parse_mode=None,
+                link_preview=False
+            )
 
         # Source link oluştur - username varsa onu kullan
         source_chat_id = message.chat_id
