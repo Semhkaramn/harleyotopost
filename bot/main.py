@@ -91,9 +91,34 @@ def utf16_to_utf8_offset(text: str, utf16_offset: int) -> int:
 
 
 def copy_entity(entity):
-    """Create a deep copy of an entity"""
-    from copy import deepcopy
-    return deepcopy(entity)
+    """Create a proper copy of an entity, preserving all attributes including custom emoji document_id"""
+    if isinstance(entity, MessageEntityCustomEmoji):
+        # Custom emoji needs special handling to preserve document_id
+        return MessageEntityCustomEmoji(
+            offset=entity.offset,
+            length=entity.length,
+            document_id=entity.document_id
+        )
+    elif isinstance(entity, MessageEntityBold):
+        return MessageEntityBold(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityItalic):
+        return MessageEntityItalic(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityCode):
+        return MessageEntityCode(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityPre):
+        return MessageEntityPre(offset=entity.offset, length=entity.length, language=getattr(entity, 'language', ''))
+    elif isinstance(entity, MessageEntityStrike):
+        return MessageEntityStrike(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityUnderline):
+        return MessageEntityUnderline(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntitySpoiler):
+        return MessageEntitySpoiler(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityBlockquote):
+        return MessageEntityBlockquote(offset=entity.offset, length=entity.length)
+    else:
+        # Fallback to deepcopy for unknown entity types
+        from copy import deepcopy
+        return deepcopy(entity)
 
 
 def clean_message_with_entities(text: str, entities: list, remove_links: bool) -> tuple:
@@ -125,18 +150,20 @@ def clean_message_with_entities(text: str, entities: list, remove_links: bool) -
             if isinstance(entity, MessageEntityTextUrl):
                 # Hyperlinked text - remove the entire text range
                 ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+                logger.debug(f"Marking TextUrl for removal: offset={entity.offset}, length={entity.length}, url={entity.url}")
             elif isinstance(entity, MessageEntityUrl):
                 # Plain URL in text - remove it
                 ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+                logger.debug(f"Marking URL for removal: offset={entity.offset}, length={entity.length}")
             elif isinstance(entity, MessageEntityMention):
                 # @mention - remove it
                 ranges_to_remove.append((entity.offset, entity.offset + entity.length))
+                logger.debug(f"Marking Mention for removal: offset={entity.offset}, length={entity.length}")
             else:
                 # Keep other entities (bold, italic, emoji, custom emoji, etc.)
                 entities_to_keep.append(copy_entity(entity))
 
     # Also find plain URLs in text that don't have entities
-    # Convert text to work with UTF-16 offsets
     for match in URL_PATTERN.finditer(text):
         start_utf8 = match.start()
         end_utf8 = match.end()
@@ -153,6 +180,7 @@ def clean_message_with_entities(text: str, entities: list, remove_links: bool) -
 
         if not already_covered:
             ranges_to_remove.append((start_utf16, end_utf16))
+            logger.debug(f"Marking plain URL for removal: {match.group()}")
 
     if not ranges_to_remove:
         # No links to remove, just clean whitespace
@@ -164,72 +192,80 @@ def clean_message_with_entities(text: str, entities: list, remove_links: bool) -
     ranges_to_remove.sort(key=lambda x: x[0])
     merged_ranges = []
     for start, end in ranges_to_remove:
-        if merged_ranges and start <= merged_ranges[-1][1]:
+        if merged_ranges and start <= merged_ranges[-1][1] + 1:  # +1 to merge adjacent ranges
             merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
         else:
             merged_ranges.append((start, end))
 
-    # Sort ranges by start position (descending) to remove from end to start
-    merged_ranges.sort(key=lambda x: x[0], reverse=True)
+    logger.debug(f"Merged ranges to remove: {merged_ranges}")
 
-    # Convert text to list of UTF-16 code units for manipulation
-    # We'll work with the string directly but track UTF-16 positions
-    cleaned_text = text
+    # Build new text by excluding the ranges
+    # Work character by character using UTF-16 positions
+    new_text_parts = []
+    current_utf16_pos = 0
 
-    # Remove ranges from end to start to maintain correct offsets
-    for utf16_start, utf16_end in merged_ranges:
-        # Convert UTF-16 offsets to string indices
-        str_start = utf16_to_utf8_offset(cleaned_text, utf16_start)
-        str_end = utf16_to_utf8_offset(cleaned_text, utf16_end)
-        cleaned_text = cleaned_text[:str_start] + cleaned_text[str_end:]
+    # Sort ranges ascending
+    merged_ranges.sort(key=lambda x: x[0])
 
-    # Calculate new offsets for kept entities
-    # Sort ranges ascending for offset calculation
-    sorted_ranges = sorted(merged_ranges, key=lambda x: x[0])
+    for char in text:
+        char_utf16_len = utf16_len(char)
+        char_end_pos = current_utf16_pos + char_utf16_len
 
+        # Check if this character falls within any removal range
+        should_remove = False
+        for r_start, r_end in merged_ranges:
+            if r_start <= current_utf16_pos < r_end:
+                should_remove = True
+                break
+
+        if not should_remove:
+            new_text_parts.append(char)
+
+        current_utf16_pos = char_end_pos
+
+    cleaned_text = ''.join(new_text_parts)
+
+    # Calculate offset shifts for each position
+    def calculate_shift(utf16_pos):
+        """Calculate how much to shift an offset based on removed ranges"""
+        shift = 0
+        for r_start, r_end in merged_ranges:
+            if r_end <= utf16_pos:
+                # Entire range is before this position
+                shift += (r_end - r_start)
+            elif r_start < utf16_pos:
+                # Range partially overlaps (shouldn't happen for entities we keep)
+                shift += (min(r_end, utf16_pos) - r_start)
+        return shift
+
+    # Adjust entities
     adjusted_entities = []
     for entity in entities_to_keep:
         original_offset = entity.offset
-        original_length = entity.length
-        entity_end = original_offset + original_length
+        original_end = original_offset + entity.length
 
-        # Calculate shift and check if entity is affected
-        shift = 0
+        # Check if entity overlaps with any removal range
         entity_removed = False
-        new_length = original_length
-
-        for r_start, r_end in sorted_ranges:
-            removed_length = r_end - r_start
-
-            if r_end <= original_offset:
-                # Range is completely before entity - shift offset
-                shift += removed_length
-            elif r_start >= entity_end:
-                # Range is completely after entity - no effect
-                pass
-            elif r_start <= original_offset and r_end >= entity_end:
-                # Range completely contains entity - remove it
+        for r_start, r_end in merged_ranges:
+            # If entity is completely inside a removal range, skip it
+            if r_start <= original_offset and original_end <= r_end:
                 entity_removed = True
                 break
-            elif r_start > original_offset and r_end < entity_end:
-                # Range is inside entity - reduce length
-                new_length -= removed_length
-            elif r_start <= original_offset < r_end < entity_end:
-                # Range overlaps start of entity
-                overlap = r_end - original_offset
-                shift += (r_start - original_offset) if r_start < original_offset else 0
-                new_length -= overlap
-                entity_removed = True  # Partial removal is tricky, skip
+            # If there's any overlap, skip it (safer approach)
+            if not (original_end <= r_start or original_offset >= r_end):
+                entity_removed = True
                 break
-            elif original_offset < r_start < entity_end <= r_end:
-                # Range overlaps end of entity
-                new_length = r_start - original_offset
 
-        if not entity_removed and new_length > 0:
-            entity.offset = original_offset - shift
-            entity.length = new_length
-            if entity.offset >= 0:
-                adjusted_entities.append(entity)
+        if entity_removed:
+            continue
+
+        # Calculate new offset
+        new_offset = original_offset - calculate_shift(original_offset)
+
+        if new_offset >= 0:
+            entity.offset = new_offset
+            # Length stays the same since the entity text wasn't modified
+            adjusted_entities.append(entity)
 
     # Clean up extra whitespace and newlines
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
@@ -252,6 +288,8 @@ def clean_message_with_entities(text: str, entities: list, remove_links: bool) -
 
     # Remove entities with negative offsets (they got stripped away)
     adjusted_entities = [e for e in adjusted_entities if e.offset >= 0]
+
+    logger.debug(f"Cleaned text length: {len(cleaned_text)}, entities count: {len(adjusted_entities)}")
 
     return cleaned_text, adjusted_entities
 
@@ -363,18 +401,22 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
 
         if has_media:
             # Forward with media
+            # parse_mode=None prevents Telegram from parsing ** as markdown
             sent_message = await client.send_file(
                 target_chat_id,
                 message.media,
                 caption=final_text if final_text else None,
-                formatting_entities=entities_to_send
+                formatting_entities=entities_to_send,
+                parse_mode=None  # Use only our entities, no auto-parsing
             )
         else:
             # Text only
+            # parse_mode=None prevents Telegram from parsing ** as markdown
             sent_message = await client.send_message(
                 target_chat_id,
                 final_text,
-                formatting_entities=entities_to_send
+                formatting_entities=entities_to_send,
+                parse_mode=None  # Use only our entities, no auto-parsing
             )
 
         # Create source link
