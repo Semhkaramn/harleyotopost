@@ -128,7 +128,6 @@ interface SourceChannel {
   append_link: string;
   daily_limit: number;
   remove_links: boolean;
-  remove_emojis: boolean;
   is_active: boolean;
   listen_type: 'direct' | 'link';
   trigger_keywords: string;
@@ -168,7 +167,6 @@ const emptySourceChannel: Partial<SourceChannel> = {
   append_link: '',
   daily_limit: 10,
   remove_links: true,
-  remove_emojis: false,
   is_active: true,
   listen_type: 'direct',
   trigger_keywords: '',
@@ -795,26 +793,15 @@ export default function Dashboard() {
                             <p className="text-xs text-zinc-500">Mesaj sonuna eklenecek link</p>
                           </div>
 
-                          <div className="grid md:grid-cols-3 gap-4">
+                          <div className="grid md:grid-cols-2 gap-4">
                             <div className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg">
                               <div>
                                 <Label>Linkleri Kaldir</Label>
-                                <p className="text-xs text-zinc-500">URL&apos;leri temizle</p>
+                                <p className="text-xs text-zinc-500">URL ve linkli kelimeleri temizle</p>
                               </div>
                               <Switch
                                 checked={editingSourceChannel.remove_links !== false}
                                 onCheckedChange={(checked) => setEditingSourceChannel(prev => ({ ...prev, remove_links: checked }))}
-                              />
-                            </div>
-
-                            <div className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg">
-                              <div>
-                                <Label>Emojileri Kaldir</Label>
-                                <p className="text-xs text-zinc-500">Emojileri sil</p>
-                              </div>
-                              <Switch
-                                checked={editingSourceChannel.remove_emojis === true}
-                                onCheckedChange={(checked) => setEditingSourceChannel(prev => ({ ...prev, remove_emojis: checked }))}
                               />
                             </div>
 
