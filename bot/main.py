@@ -46,6 +46,16 @@ TELEGRAM_LINK_PATTERN = re.compile(
     r'(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?(\d+|[a-zA-Z][a-zA-Z0-9_]*)/(\d+)'
 )
 
+
+def utf16_len(text: str) -> int:
+    """
+    Telethon UTF-16 code unit uzunluğunu hesapla.
+    Türkçe ve özel karakterler için gerekli.
+    """
+    if not text:
+        return 0
+    return len(text.encode('utf-16-le')) // 2
+
 # Link entity tipleri (silinecek)
 LINK_ENTITY_TYPES = (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)
 
@@ -80,6 +90,8 @@ def remove_links_from_message(raw_text: str, entities: list) -> tuple:
     Mesajdan link entity'lerini içeren SATIRLARI tamamen kaldır.
     Formatting entity'lerini (bold, italic, custom emoji vb.) koru.
 
+    NOT: Telethon entity offset/length değerleri UTF-16 code units cinsindendir.
+
     Args:
         raw_text: Mesajın düz metni (message.raw_text)
         entities: Mesajın entity listesi
@@ -102,32 +114,35 @@ def remove_links_from_message(raw_text: str, entities: list) -> tuple:
             link_entities.append(entity)
         elif isinstance(entity, FORMATTING_ENTITY_TYPES):
             formatting_entities.append(entity)
-        else:
-            # Bilinmeyen ama link olmayan entity'leri de koru
-            formatting_entities.append(entity)
 
     # Link yoksa orijinali döndür
     if not link_entities:
-        return raw_text, formatting_entities
+        return raw_text, list(formatting_entities)
 
     # Satırları bul
     lines = raw_text.split('\n')
+
+    # Her satırın UTF-16 başlangıç ve bitiş pozisyonlarını hesapla
+    line_positions_utf16 = []
+    current_pos_utf16 = 0
+    for line in lines:
+        line_len_utf16 = utf16_len(line)
+        line_end_utf16 = current_pos_utf16 + line_len_utf16
+        line_positions_utf16.append((current_pos_utf16, line_end_utf16))
+        current_pos_utf16 = line_end_utf16 + 1  # +1 for \n
 
     # Her link entity'sinin hangi satırda olduğunu bul
     lines_to_remove = set()
 
     for entity in link_entities:
-        # UTF-16 offset'i karakter pozisyonuna çevir
         link_start = entity.offset
+        link_end = entity.offset + entity.length
 
-        # Link'in hangi satırda olduğunu bul
-        current_pos = 0
-        for line_idx, line in enumerate(lines):
-            line_end = current_pos + len(line)
-            if current_pos <= link_start < line_end + 1:  # +1 for \n
+        # Link'in hangi satır(lar)da olduğunu bul
+        for line_idx, (start, end) in enumerate(line_positions_utf16):
+            # Link bu satırla kesişiyor mu?
+            if link_start <= end and link_end >= start:
                 lines_to_remove.add(line_idx)
-                break
-            current_pos = line_end + 1  # +1 for \n
 
     # Link içermeyen satırları birleştir
     cleaned_lines = []
@@ -141,28 +156,49 @@ def remove_links_from_message(raw_text: str, entities: list) -> tuple:
     while '\n\n\n' in cleaned_text:
         cleaned_text = cleaned_text.replace('\n\n\n', '\n\n')
 
-    # Formatting entity'lerini güncelle - link satırları silindikten sonra offset'leri ayarla
-    # Not: Bu basit bir yaklaşım - karmaşık formatlama için daha detaylı işlem gerekebilir
+    # Silinen UTF-16 karakter sayısını hesapla
+    removed_utf16_chars = 0
+    for line_idx in sorted(lines_to_remove):
+        start, end = line_positions_utf16[line_idx]
+        removed_utf16_chars += (end - start) + 1  # +1 for \n
+
+    # Formatting entity'lerini filtrele ve güncelle
     updated_formatting = []
-    removed_chars = 0
-    current_pos = 0
-
-    for line_idx, line in enumerate(lines):
-        line_len = len(line) + 1  # +1 for \n
-        if line_idx in lines_to_remove:
-            # Bu satır silindi, offset'leri güncelle
-            for entity in formatting_entities:
-                if entity.offset >= current_pos + line_len:
-                    entity.offset -= line_len
-            removed_chars += line_len
-        current_pos += line_len
-
-    # Sadece geçerli entity'leri tut
     for entity in formatting_entities:
-        if entity.offset >= 0 and entity.length > 0:
-            # Entity'nin pozisyonunun temizlenmiş metinde geçerli olup olmadığını kontrol et
-            if entity.offset < len(cleaned_text):
-                updated_formatting.append(entity)
+        entity_start = entity.offset
+        entity_end = entity.offset + entity.length
+
+        # Entity silinen bir satırda mı?
+        entity_in_removed_line = False
+        for line_idx in lines_to_remove:
+            start, end = line_positions_utf16[line_idx]
+            if entity_start <= end and entity_end >= start:
+                entity_in_removed_line = True
+                break
+
+        if not entity_in_removed_line:
+            # Entity'nin offset'ini hesapla
+            # Silinen satırların UTF-16 uzunluklarını çıkar
+            adjustment = 0
+            for line_idx in sorted(lines_to_remove):
+                start, end = line_positions_utf16[line_idx]
+                line_utf16_len = (end - start) + 1  # +1 for \n
+                if start < entity_start:
+                    adjustment += line_utf16_len
+
+            new_offset = entity_start - adjustment
+            cleaned_text_utf16_len = utf16_len(cleaned_text)
+
+            if new_offset >= 0 and new_offset < cleaned_text_utf16_len:
+                try:
+                    new_entity = type(entity)(
+                        offset=new_offset,
+                        length=entity.length,
+                        **{k: v for k, v in entity.__dict__.items() if k not in ['offset', 'length']}
+                    )
+                    updated_formatting.append(new_entity)
+                except Exception:
+                    pass
 
     return cleaned_text.strip(), updated_formatting
 
@@ -192,8 +228,9 @@ def append_link_to_text(text: str, link: str, link_text: str = None) -> tuple:
 
     if text:
         new_text = f"{text}\n\n{display_text}"
-        # Link entity'si için offset hesapla (UTF-16)
-        link_offset = len(text) + 2  # +2 for \n\n
+        # Link entity'si için offset hesapla (UTF-16 code units!)
+        # Türkçe karakterler için utf16_len kullanmalıyız
+        link_offset = utf16_len(text) + 2  # +2 for \n\n
     else:
         new_text = display_text
         link_offset = 0
@@ -202,9 +239,10 @@ def append_link_to_text(text: str, link: str, link_text: str = None) -> tuple:
     entities = []
     if link_text and link_text.strip():
         # MessageEntityTextUrl entity'si oluştur
+        # Length de UTF-16 code units olmalı!
         entity = MessageEntityTextUrl(
             offset=link_offset,
-            length=len(display_text),
+            length=utf16_len(display_text),
             url=link
         )
         entities.append(entity)
@@ -255,7 +293,12 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
     global client
 
     try:
-        target_chat_id = source_channel_config['target_chat_id']
+        # target_chat_id'yi integer'a çevir (string olabilir)
+        target_chat_id_raw = source_channel_config['target_chat_id']
+        try:
+            target_chat_id = int(target_chat_id_raw)
+        except (ValueError, TypeError):
+            target_chat_id = target_chat_id_raw  # String ise öyle kalsın (@username gibi)
         append_link = source_channel_config['append_link']
         append_link_text = source_channel_config.get('append_link_text', '')
         remove_links = source_channel_config['remove_links']
@@ -479,7 +522,8 @@ async def setup_message_handler():
                     await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
 
         except Exception as e:
-            logger.error(f"Handler error: {e}")
+            import traceback
+            logger.error(f"Handler error: {e}\n{traceback.format_exc()}")
 
 
 async def update_bot_status(status: str):
