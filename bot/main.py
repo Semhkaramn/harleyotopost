@@ -356,6 +356,7 @@ async def setup_message_handler():
             listen_type = source_channel.get('listen_type', 'direct')
 
             if listen_type == 'link':
+                # LINK MODU: Mesajdaki linkleri bul, o linklerdeki mesajları çek ve gönder
                 links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
                 if links:
@@ -364,20 +365,14 @@ async def setup_message_handler():
                         await handle_telegram_link(event, full_link)
 
             else:  # listen_type == 'direct'
-                links = TELEGRAM_LINK_PATTERN.findall(message_text)
+                # DIRECT MODU: Gelen mesajı direkt al ve gönder (entity'ler korunur)
+                if message_text or event.message.media:
+                    can_post = await db.can_post_today(source_channel['id'])
+                    if not can_post:
+                        logger.info(f"Daily limit reached for channel {source_channel['id']}")
+                        return
 
-                if links:
-                    for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
-                        full_link = match.group(0)
-                        await handle_telegram_link(event, full_link)
-                else:
-                    if message_text or event.message.media:
-                        can_post = await db.can_post_today(source_channel['id'])
-                        if not can_post:
-                            logger.info(f"Daily limit reached for channel {source_channel['id']}")
-                            return
-
-                        await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
+                    await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id)
 
         except Exception as e:
             logger.error(f"Error in message handler: {e}")
