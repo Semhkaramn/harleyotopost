@@ -76,6 +76,34 @@ def create_client():
     )
 
 
+def create_entity_copy(entity):
+    """
+    Entity'yi yeni bir obje olarak kopyala.
+    Telethon entity'leri için deep copy düzgün çalışmayabilir.
+    """
+    if isinstance(entity, MessageEntityBold):
+        return MessageEntityBold(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityItalic):
+        return MessageEntityItalic(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityCode):
+        return MessageEntityCode(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityPre):
+        return MessageEntityPre(offset=entity.offset, length=entity.length, language=getattr(entity, 'language', ''))
+    elif isinstance(entity, MessageEntityUnderline):
+        return MessageEntityUnderline(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityStrike):
+        return MessageEntityStrike(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntitySpoiler):
+        return MessageEntitySpoiler(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityBlockquote):
+        return MessageEntityBlockquote(offset=entity.offset, length=entity.length)
+    elif isinstance(entity, MessageEntityCustomEmoji):
+        return MessageEntityCustomEmoji(offset=entity.offset, length=entity.length, document_id=entity.document_id)
+    else:
+        # Bilinmeyen entity tipini olduğu gibi döndür
+        return entity
+
+
 def remove_links_from_text(text: str, entities: list) -> tuple:
     """
     Metinden linkleri tamamen kaldır ama formatting entity'lerini koru.
@@ -97,14 +125,10 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
     if not entities:
         # Entity yok, sadece regex ile URL'leri ve markdown linkleri temizle
         cleaned = URL_PATTERN.sub('', text)
-        # Markdown [text](url) formatını tamamen sil
         cleaned = MARKDOWN_LINK_PATTERN.sub('', cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         cleaned = re.sub(r' {2,}', ' ', cleaned)
         return cleaned.strip(), []
-
-    # Deep copy ile entity'leri kopyala (orijinalleri değiştirmemek için)
-    entities_copy = copy.deepcopy(entities)
 
     # Link entity'lerinin kapladığı aralıkları bul (tamamen silinecek)
     link_ranges = []
@@ -117,96 +141,78 @@ def remove_links_from_text(text: str, entities: list) -> tuple:
         MessageEntitySpoiler, MessageEntityCustomEmoji, MessageEntityBlockquote
     )
 
-    for entity in entities_copy:
+    for entity in entities:
         if isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
-            # MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention - tamamen sil
+            # Link entity - tamamen sil (hem metin hem URL)
             link_ranges.append((entity.offset, entity.offset + entity.length))
         elif isinstance(entity, FORMATTING_TYPES):
-            # Formatting entity'lerini koru
-            formatting_entities.append(entity)
-        # Diğer bilinmeyen entity'leri de koru
-        elif not isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
-            formatting_entities.append(entity)
+            # Formatting entity - yeni obje olarak kopyala
+            formatting_entities.append(create_entity_copy(entity))
+        else:
+            # Diğer entity'leri de koru (bilinmeyen tipler)
+            if not isinstance(entity, (MessageEntityTextUrl, MessageEntityUrl, MessageEntityMention)):
+                formatting_entities.append(entity)
 
+    # Link yoksa entity'leri olduğu gibi döndür (regex KULLANMA - offset bozulur!)
     if not link_ranges:
-        # Link entity yok, regex ile temizle
-        new_text = text
-        # Markdown [text](url) formatını tamamen sil
-        new_text = MARKDOWN_LINK_PATTERN.sub('', new_text)
-        # Düz URL'leri sil
-        new_text = URL_PATTERN.sub('', new_text)
-        new_text = re.sub(r'\n{3,}', '\n\n', new_text)
-        new_text = re.sub(r' {2,}', ' ', new_text)
-        return new_text.strip(), formatting_entities
+        return text, formatting_entities
 
     # Aralıkları sırala (sondan başa doğru silmek için ters sırala)
     link_ranges.sort(key=lambda x: x[0], reverse=True)
 
-    # Her aralığı sil ve entity offset'lerini güncelle
-    # UTF-16 code units olarak çalış (Telegram entity offset'leri UTF-16 kullanır)
-    current_text = text
+    # UTF-16 ile çalış (Telegram entity offset'leri UTF-16 code units)
+    # Python string'i UTF-16-LE byte array'e çevir
+    text_utf16 = text.encode('utf-16-le')
 
     for start, end in link_ranges:
         removed_length = end - start
 
-        # UTF-16 offset'leri Python string index'lerine çevir
-        text_utf16 = current_text.encode('utf-16-le')
+        # UTF-16 byte offset'leri (her karakter 2 byte)
         start_byte = start * 2
         end_byte = end * 2
 
         if start_byte <= len(text_utf16) and end_byte <= len(text_utf16):
-            # Metni kes (link metnini tamamen sil)
+            # Metni kes
             text_utf16 = text_utf16[:start_byte] + text_utf16[end_byte:]
-            current_text = text_utf16.decode('utf-16-le', errors='ignore')
 
             # Formatting entity'lerinin offset'lerini güncelle
-            new_formatting_entities = []
+            updated_entities = []
             for entity in formatting_entities:
+                entity_start = entity.offset
                 entity_end = entity.offset + entity.length
 
-                if entity.offset >= end:
-                    # Entity tamamen silinen kısımdan sonra, offset'i azalt
+                if entity_start >= end:
+                    # Entity tamamen silinen kısımdan sonra - offset'i azalt
                     entity.offset -= removed_length
-                    new_formatting_entities.append(entity)
+                    updated_entities.append(entity)
                 elif entity_end <= start:
-                    # Entity tamamen silinen kısımdan önce, değişiklik yok
-                    new_formatting_entities.append(entity)
-                elif entity.offset < start and entity_end > end:
-                    # Entity silinen kısmı tamamen kapsıyor, length'i azalt
+                    # Entity tamamen silinen kısımdan önce - değişiklik yok
+                    updated_entities.append(entity)
+                elif entity_start < start and entity_end > end:
+                    # Entity silinen kısmı tamamen kapsıyor - length'i azalt
                     entity.length -= removed_length
                     if entity.length > 0:
-                        new_formatting_entities.append(entity)
-                elif entity.offset >= start and entity_end <= end:
-                    # Entity tamamen silinen kısımda, entity'yi atla
+                        updated_entities.append(entity)
+                elif entity_start >= start and entity_end <= end:
+                    # Entity tamamen silinen kısımda - entity'yi atla (sil)
                     pass
-                elif entity.offset < start and entity_end > start and entity_end <= end:
+                elif entity_start < start and entity_end > start and entity_end <= end:
                     # Entity'nin sonu silinen kısımda
-                    entity.length = start - entity.offset
+                    entity.length = start - entity_start
                     if entity.length > 0:
-                        new_formatting_entities.append(entity)
-                elif entity.offset >= start and entity.offset < end and entity_end > end:
+                        updated_entities.append(entity)
+                elif entity_start >= start and entity_start < end and entity_end > end:
                     # Entity'nin başı silinen kısımda
                     new_length = entity_end - end
                     entity.offset = start
                     entity.length = new_length
                     if entity.length > 0:
-                        new_formatting_entities.append(entity)
+                        updated_entities.append(entity)
 
-            formatting_entities = new_formatting_entities
+            formatting_entities = updated_entities
 
-    # Son temizlik - kalan markdown linkleri ve URL'leri temizle
-    # NOT: Bu aşamada entity offset'leri bozulabilir, dikkat!
-    # Önce mevcut entity'lerin kapsadığı alanları bul
-    protected_ranges = [(e.offset, e.offset + e.length) for e in formatting_entities]
-
-    # Markdown linklerini ve URL'leri regex ile bul ve sil (entity dışındakileri)
-    # Basit yaklaşım: entity'leri zaten işledik, kalan text-based linkleri sil
-    current_text = MARKDOWN_LINK_PATTERN.sub('', current_text)
-    current_text = URL_PATTERN.sub('', current_text)
-
-    # Çoklu boşluk ve satır temizliği
-    current_text = re.sub(r'\n{3,}', '\n\n', current_text)
-    current_text = re.sub(r' {2,}', ' ', current_text)
+    # UTF-16 byte array'i tekrar string'e çevir
+    current_text = text_utf16.decode('utf-16-le', errors='ignore')
 
     return current_text.strip(), formatting_entities
 
