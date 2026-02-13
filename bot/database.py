@@ -347,9 +347,15 @@ async def get_source_channel(source_chat_id: int) -> Optional[Dict[str, Any]]:
     """Get a source channel by chat ID"""
     _check_pool()
     async with pool.acquire() as conn:
+        # source_chat_id'yi int'e çevir (güvenlik için)
+        try:
+            chat_id = int(source_chat_id)
+        except (ValueError, TypeError):
+            return None
+
         row = await conn.fetchrow(
             'SELECT * FROM source_channels WHERE source_chat_id = $1 AND is_active = TRUE',
-            source_chat_id
+            chat_id
         )
         return dict(row) if row else None
 
@@ -370,9 +376,13 @@ async def get_active_source_channels() -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-async def is_source_channel(chat_id: int) -> bool:
+async def is_source_channel(chat_id) -> bool:
     """Check if a chat is a registered source channel"""
-    channel = await get_source_channel(chat_id)
+    try:
+        chat_id_int = int(chat_id)
+    except (ValueError, TypeError):
+        return False
+    channel = await get_source_channel(chat_id_int)
     return channel is not None
 
 
