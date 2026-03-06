@@ -26,8 +26,7 @@ from telethon.errors import (
     ChatWriteForbiddenError,
     AuthKeyUnregisteredError,
     UserDeactivatedBanError,
-    ChatSendMediaForbiddenError,
-    ChatSendPhotosForbiddenError
+    RPCError
 )
 import config
 import database as db
@@ -462,32 +461,37 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         )
         return False
 
-    except (ChatSendMediaForbiddenError, ChatSendPhotosForbiddenError) as e:
-        logger.error(f"❌ Hedefe medya gönderilemedi (izin yok): {source_channel_config.get('target_title', target_chat_id)} - {type(e).__name__}")
-        # Media olmadan sadece text olarak göndermeyi dene
-        try:
-            if final_text:
-                await client.send_message(
-                    entity=target_chat_id,
-                    message=final_text + "\n\n⚠️ (Medya gönderilemedi - izin yok)",
-                    formatting_entities=final_entities if final_entities else None,
-                    parse_mode=None,
-                    link_preview=False
-                )
-                logger.info(f"📝 Medya yerine sadece metin gönderildi: {target_chat_id}")
-        except Exception:
-            pass
-        await db.add_post(
-            source_channel_id=source_channel_config['id'],
-            source_link=f"t.me/{message.chat_id}/{message.id}",
-            source_chat_id=message.chat_id,
-            source_message_id=message.id,
-            target_chat_id=target_chat_id,
-            target_message_id=0,
-            status='media_forbidden',
-            has_media=True
-        )
-        return False
+    except RPCError as e:
+        # Medya gönderme izni hatalarını yakala (403 CHAT_SEND_PHOTOS_FORBIDDEN, CHAT_SEND_MEDIA_FORBIDDEN vb.)
+        if e.code == 403 and 'FORBIDDEN' in str(e.message).upper():
+            logger.error(f"❌ Hedefe medya gönderilemedi (izin yok): {source_channel_config.get('target_title', target_chat_id)} - {e.message}")
+            # Media olmadan sadece text olarak göndermeyi dene
+            try:
+                if final_text:
+                    await client.send_message(
+                        entity=target_chat_id,
+                        message=final_text + "\n\n⚠️ (Medya gönderilemedi - izin yok)",
+                        formatting_entities=final_entities if final_entities else None,
+                        parse_mode=None,
+                        link_preview=False
+                    )
+                    logger.info(f"📝 Medya yerine sadece metin gönderildi: {target_chat_id}")
+            except Exception:
+                pass
+            await db.add_post(
+                source_channel_id=source_channel_config['id'],
+                source_link=f"t.me/{message.chat_id}/{message.id}",
+                source_chat_id=message.chat_id,
+                source_message_id=message.id,
+                target_chat_id=target_chat_id,
+                target_message_id=0,
+                status='media_forbidden',
+                has_media=True
+            )
+            return False
+        else:
+            logger.error(f"❌ RPC hatası: {e}")
+            return False
 
     except Exception as e:
         logger.error(f"❌ Forward hatası: {e}")
