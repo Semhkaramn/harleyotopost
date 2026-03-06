@@ -1,3 +1,4 @@
+import asyncio
 import asyncpg
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
@@ -142,9 +143,14 @@ async def close_db():
     global pool
     if pool:
         try:
-            await pool.close()
+            # Tüm bağlantıları düzgün kapat
+            await asyncio.wait_for(pool.close(), timeout=5.0)
             pool = None
             logger.info("Database connection pool closed")
+        except asyncio.TimeoutError:
+            pool.terminate()
+            pool = None
+            logger.warning("Database pool terminated (timeout)")
         except Exception as e:
             logger.error(f"Error closing database pool: {e}")
 
