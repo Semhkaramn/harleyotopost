@@ -30,6 +30,12 @@ from telethon.errors import (
 import config
 import database as db
 
+# Telethon'un gereksiz loglarını ÖNCE kapat (Got difference for channel X updates vs.)
+logging.getLogger('telethon').setLevel(logging.ERROR)
+logging.getLogger('telethon.client.updates').setLevel(logging.ERROR)
+logging.getLogger('telethon.network.mtprotosender').setLevel(logging.ERROR)
+logging.getLogger('telethon.extensions.messagepacker').setLevel(logging.ERROR)
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -437,12 +443,12 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         return True
 
     except FloodWaitError as e:
-        logger.warning(f"Flood wait: {e.seconds}s")
+        logger.warning(f"⏳ Flood wait: {e.seconds}s bekleniyor...")
         await asyncio.sleep(e.seconds)
         return False
 
     except ChatWriteForbiddenError:
-        logger.error(f"Cannot write to {target_chat_id}")
+        logger.error(f"❌ Hedefe yazılamıyor: {source_channel_config.get('target_title', target_chat_id)}")
         await db.add_post(
             source_channel_id=source_channel_config['id'],
             source_link=f"t.me/{message.chat_id}/{message.id}",
@@ -456,7 +462,7 @@ async def forward_message(source_channel_config: dict, message, source_event_cha
         return False
 
     except Exception as e:
-        logger.error(f"Forward error: {e}")
+        logger.error(f"❌ Forward hatası: {e}")
         return False
 
 
@@ -468,6 +474,7 @@ async def handle_telegram_link(event, link: str):
         chat_id, message_id = await parse_telegram_link(link)
 
         if not chat_id or not message_id:
+            logger.warning(f"❌ Link parse edilemedi: {link}")
             return
 
         try:
@@ -476,20 +483,23 @@ async def handle_telegram_link(event, link: str):
                 message = await client.get_messages(entity, ids=message_id)
             else:
                 message = await client.get_messages(chat_id, ids=message_id)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"❌ Mesaj alınamadı ({link}): {e}")
             return
 
         if not message:
+            logger.warning(f"❌ Mesaj bulunamadı: {link}")
             return
 
         source_channel = await db.get_source_channel(event.chat_id)
 
         if not source_channel:
+            logger.debug(f"⏭️ Kayıtlı kaynak kanal değil: {event.chat_id}")
             return
 
         can_post = await db.can_post_today(source_channel['id'])
         if not can_post:
-            # Limit aşıldığında kullanıcıya bildir - REPLY olarak
+            logger.info(f"⚠️ Günlük limit doldu: {source_channel.get('source_title', event.chat_id)}")
             if source_channel.get('send_link_back', False):
                 try:
                     await client.send_message(
@@ -502,6 +512,7 @@ async def handle_telegram_link(event, link: str):
                     pass
             return
 
+        logger.info(f"📤 Link işleniyor: {link} -> {source_channel.get('target_title', source_channel['target_chat_id'])}")
         await forward_message(source_channel, message, source_event_chat_id=event.chat_id, source_event_message_id=event.message.id)
 
     except Exception as e:
@@ -522,24 +533,31 @@ async def setup_message_handler():
             source_channel = await db.get_source_channel(event.chat_id)
 
             if not source_channel:
+                # Kayıtlı olmayan kanalları loglama (spam olur)
                 return
 
+            source_title = source_channel.get('source_title', str(event.chat_id))
             message_text = event.message.raw_text or event.message.caption or ''
             listen_type = source_channel.get('listen_type', 'direct')
+
+            logger.info(f"📩 Mesaj alındı [{source_title}] mode={listen_type}")
 
             if listen_type == 'link':
                 links = TELEGRAM_LINK_PATTERN.findall(message_text)
 
                 if links:
+                    logger.info(f"🔗 {len(links)} link bulundu")
                     for match in TELEGRAM_LINK_PATTERN.finditer(message_text):
                         full_link = match.group(0)
                         await handle_telegram_link(event, full_link)
+                else:
+                    logger.debug(f"⏭️ Link bulunamadı, atlanıyor")
 
             else:  # listen_type == 'direct'
                 if message_text or event.message.media:
                     can_post = await db.can_post_today(source_channel['id'])
                     if not can_post:
-                        # Limit aşıldığında kullanıcıya bildir - REPLY olarak
+                        logger.info(f"⚠️ Günlük limit doldu: {source_title}")
                         if source_channel.get('send_link_back', False):
                             try:
                                 await client.send_message(
@@ -552,6 +570,7 @@ async def setup_message_handler():
                                 pass
                         return
 
+                    logger.info(f"📤 Direkt mesaj iletiliyor: {source_title}")
                     await forward_message(source_channel, event.message, source_event_chat_id=event.chat_id, source_event_message_id=event.message.id)
 
         except Exception as e:
